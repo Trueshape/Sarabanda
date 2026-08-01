@@ -68,10 +68,10 @@ Il bot ti farà 4 domande in chat, una alla volta (hai 60 secondi per rispondere
 a ciascuna):
 
 1. **Quante canzoni** vuoi riprodurre → scrivi un numero, es. `10`
-2. **Playlist Spotify o casuale?** → incolla il link di una playlist Spotify,
-   oppure scrivi `casuale` per pescare brani a caso da un pool di playlist
-   editoriali Spotify (Top Hits, Top 50 Global, All Out 80s/90s/2010s,
-   RapCaviar, Rock Classics, Viva Latino)
+2. **Playlist specifica o casuale?** → incolla il link di una playlist **Spotify o Deezer**
+   (il bot riconosce automaticamente da quale servizio proviene), oppure scrivi
+   `casuale` per pescare brani dalla classifica globale Deezer (nessun account
+   richiesto, sempre disponibile)
 3. **Modalità di gioco** → scrivi `aperta` (rispondi scrivendo liberamente
    titolo/artista) oppure `scelta multipla` (rispondi con un numero da 4
    opzioni mostrate in chat)
@@ -99,12 +99,19 @@ Dopo ogni round, il bot rivela il brano e mostra automaticamente la
 
 ## Note tecniche e limiti
 
-- **Perché Deezer come fallback?** Dalla fine del 2024 Spotify restituisce
-  `preview_url: null` per la maggior parte dei brani tramite Web API. Il bot
-  prova prima Spotify e, se manca l'anteprima, cerca lo stesso brano/artista
-  su Deezer (API pubblica, senza bisogno di account/token) e usa quella
-  anteprima da 30 secondi. Se anche Deezer non trova nulla, il brano viene
-  saltato automaticamente e se ne prova un altro.
+- **⚠️ Spotify richiede ora un account Premium per l'app**: Spotify ha
+  introdotto un requisito per cui l'account proprietario dell'app developer
+  deve avere un abbonamento Premium attivo, altrimenti le richieste API
+  falliscono con errore 403 ("Active premium subscription required").
+  Se non hai Premium, **usa link Deezer o la modalità `casuale`** (basata
+  sulla classifica Deezer), che funzionano sempre senza bisogno di alcun
+  account o autenticazione.
+- **Riconoscimento automatico Spotify/Deezer**: quando incolli un link di
+  playlist, il bot riconosce da solo se è un link Spotify o Deezer in base
+  al dominio nell'URL, e usa l'API corrispondente. Per Deezer il preview
+  audio è già incluso nella risposta; per Spotify, se manca il
+  `preview_url`, il bot cerca automaticamente lo stesso brano su Deezer
+  come fallback.
 - Ogni round dura al massimo `ROUND_DURATION_SECONDS` (default 30s, modificabile
   in `.env`), o termina prima se sia titolo che artista vengono indovinati.
 - I punteggi sono salvati in `data/scores_<id_server>.json`, uno per server.

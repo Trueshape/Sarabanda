@@ -29,7 +29,12 @@ from dotenv import load_dotenv
 import scores
 from keep_alive import keep_alive
 from matching import any_artist_match, is_close_match
-from music_source import SpotifyProvider, resolve_playable_url
+from music_source import (
+    SpotifyProvider,
+    fetch_deezer_chart_tracks,
+    fetch_tracks_from_source,
+    resolve_playable_url,
+)
 
 load_dotenv()
 
@@ -130,13 +135,6 @@ SETUP_TIMEOUT = 60  # secondi di attesa per ogni risposta durante la configurazi
 async def quiz_start(ctx: commands.Context):
     state = get_state(ctx.guild.id)
 
-    if spotify_provider is None:
-        await ctx.send(
-            "⚠️ Credenziali Spotify non configurate. Controlla il file `.env` "
-            "(SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET)."
-        )
-        return
-
     if state.active:
         await ctx.send("⚠️ Il quiz è già in corso in questo server.")
         return
@@ -164,8 +162,8 @@ async def quiz_start(ctx: commands.Context):
 
     # 2) Playlist specifica o casuale
     await ctx.send(
-        "🎧 Vuoi usare una **playlist Spotify** specifica o canzoni **casuali**?\n"
-        "Incolla il link della playlist, oppure scrivi `casuale`."
+        "🎧 Vuoi usare una playlist **Spotify** o **Deezer** specifica, oppure canzoni **casuali**?\n"
+        "Incolla il link della playlist (Spotify o Deezer), oppure scrivi `casuale`."
     )
     try:
         reply = await bot.wait_for("message", check=check, timeout=SETUP_TIMEOUT)
@@ -217,9 +215,9 @@ async def quiz_start(ctx: commands.Context):
     await ctx.send("🔎 Preparo i brani, un attimo...")
     try:
         if source_choice.lower() == "casuale":
-            tracks = spotify_provider.fetch_random_tracks(limit=max(rounds * 3, 30))
+            tracks = fetch_deezer_chart_tracks(limit=max(rounds * 3, 30))
         else:
-            tracks = spotify_provider.fetch_tracks(source_choice)
+            tracks = fetch_tracks_from_source(source_choice, spotify_provider)
     except Exception as e:
         await ctx.send(f"❌ Errore nel recupero dei brani: `{e}`")
         return

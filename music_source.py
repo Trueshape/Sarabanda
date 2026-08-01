@@ -1,12 +1,18 @@
 """
-Recupero brani:
-- Spotify (Client Credentials Flow) per playlist / metadati (titolo, artisti)
-- Deezer (API pubblica, senza auth) come fallback per l'audio quando
-  Spotify non fornisce preview_url (molto comune dal 2024 in poi).
+Recupero brani da due fonti:
+- Spotify (Client Credentials Flow) per playlist / metadati.
+  NB: da policy recenti Spotify richiede che l'account proprietario
+  dell'app abbia un abbonamento Premium per poter leggere dati via API;
+  senza Premium le richieste falliscono con 403.
+- Deezer (API pubblica, nessuna autenticazione richiesta) per playlist
+  Deezer dirette, per il fallback audio quando manca il preview Spotify,
+  e per la modalità "casuale" (chart Deezer), che quindi funziona sempre
+  anche senza Spotify Premium.
 """
 
 import os
 import random
+import re
 
 import requests
 import spotipy
@@ -98,6 +104,100 @@ class SpotifyProvider:
 
         random.shuffle(pool)
         return pool[:limit] if limit else pool
+
+
+def is_deezer_source(source: str) -> bool:
+    return "deezer.com" in source.lower()
+
+
+def is_spotify_source(source: str) -> bool:
+    return "spotify.com" in source.lower()
+
+
+def extract_deezer_playlist_id(source: str) -> str:
+    """Estrae l'ID numerico da un link tipo
+    https://www.deezer.com/it/playlist/1282495565 (o varianti con altre lingue/query string)."""
+    match = re.search(r"playlist/(\d+)", source)
+    if match:
+        return match.group(1)
+    return source.strip()
+
+
+def fetch_deezer_playlist_tracks(playlist_url_or_id: str, limit: int = 300) -> list[dict]:
+    """Legge una playlist Deezer pubblica tramite l'API pubblica (nessuna auth
+    richiesta). Il preview mp3 è già incluso direttamente nella risposta,
+    quindi non serve nessuna ricerca di fallback."""
+    playlist_id = extract_deezer_playlist_id(playlist_url_or_id)
+    tracks: list[dict] = []
+    url = f"https://api.deezer.com/playlist/{playlist_id}/tracks"
+
+    while url and len(tracks) < limit:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        if "error" in payload:
+            raise RuntimeError(payload["error"].get("message", "Errore API Deezer"))
+
+        for item in payload.get("data", []):
+            name = item.get("title")
+            artist_name = (item.get("artist") or {}).get("name")
+            preview_url = item.get("preview")
+            if name and artist_name:
+                tracks.append(
+                    {"name": name, "artists": [artist_name], "preview_url": preview_url}
+                )
+            if len(tracks) >= limit:
+                break
+
+        url = payload.get("next")
+
+    return tracks
+
+
+def fetch_deezer_chart_tracks(limit: int = 50) -> list[dict]:
+    """Pesca canzoni dalla classifica globale Deezer (chart), utile per la
+    modalità 'casuale': nessuna autenticazione richiesta, sempre disponibile."""
+    tracks: list[dict] = []
+    url = "https://api.deezer.com/chart/0/tracks"
+
+    while url and len(tracks) < limit:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        for item in payload.get("data", []):
+            name = item.get("title")
+            artist_name = (item.get("artist") or {}).get("name")
+            preview_url = item.get("preview")
+            if name and artist_name:
+                tracks.append(
+                    {"name": name, "artists": [artist_name], "preview_url": preview_url}
+                )
+            if len(tracks) >= limit:
+                break
+
+        url = payload.get("next")
+
+    random.shuffle(tracks)
+    return tracks
+
+
+def fetch_tracks_from_source(source: str, spotify_provider: "SpotifyProvider | None" = None) -> list[dict]:
+    """Dispatcher: riconosce se il link è Deezer o Spotify e usa la fonte giusta."""
+    if is_deezer_source(source):
+        return fetch_deezer_playlist_tracks(source)
+
+    if is_spotify_source(source) or spotify_provider is not None:
+        if spotify_provider is None:
+            raise RuntimeError(
+                "Playlist Spotify richiesta ma le credenziali Spotify non sono configurate."
+            )
+        return spotify_provider.fetch_tracks(source)
+
+    raise RuntimeError(
+        "Non riconosco questo link: incolla un link Spotify o Deezer valido."
+    )
 
 
 def deezer_preview_for(title: str, artist: str) -> str | None:

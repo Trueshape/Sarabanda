@@ -33,6 +33,8 @@ from matching import any_artist_match, is_close_match
 from music_source import (
     SpotifyProvider,
     fetch_deezer_chart_tracks,
+    fetch_deezer_genres,
+    fetch_random_tracks_by_category,
     fetch_tracks_from_source,
     resolve_playable_url,
 )
@@ -135,11 +137,28 @@ async def quiz_help(interaction: discord.Interaction):
     await interaction.response.send_message(embed=help_embed())
 
 
+async def categoria_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    try:
+        genres = await asyncio.to_thread(fetch_deezer_genres)
+    except Exception:
+        genres = []
+
+    current_lower = current.lower()
+    matches = [g for g in genres if current_lower in g["name"].lower()]
+    return [
+        app_commands.Choice(name=g["name"], value=str(g["id"]))
+        for g in matches[:25]
+    ]
+
+
 @quiz_group.command(name="start", description="Avvia il quiz musicale")
 @app_commands.describe(
     canzoni="Quante canzoni riprodurre (es. 10)",
     modalita="Come si risponde: scrivendo liberamente o scegliendo tra 4 opzioni",
-    fonte="Link playlist Spotify o Deezer. Lascia vuoto per canzoni casuali (classifica Deezer)",
+    fonte="Link Spotify/Deezer/iTunes (playlist, brano singolo, o più link separati da virgola). Vuoto = casuale",
+    categoria="Categoria musicale (solo se 'fonte' è vuoto): filtra le canzoni casuali per genere",
     durata="Durata di ogni round in secondi (default 30)",
 )
 @app_commands.choices(
@@ -148,11 +167,13 @@ async def quiz_help(interaction: discord.Interaction):
         app_commands.Choice(name="Scelta multipla (4 opzioni numerate)", value="scelta_multipla"),
     ]
 )
+@app_commands.autocomplete(categoria=categoria_autocomplete)
 async def quiz_start(
     interaction: discord.Interaction,
     canzoni: app_commands.Range[int, 1, 100],
     modalita: app_commands.Choice[str],
     fonte: str = None,
+    categoria: str = None,
     durata: app_commands.Range[int, 5, 120] = ROUND_DURATION,
 ):
     state = get_state(interaction.guild.id)
@@ -173,11 +194,32 @@ async def quiz_start(
 
     try:
         if not fonte or fonte.strip().lower() == "casuale":
-            tracks = await asyncio.wait_for(
-                asyncio.to_thread(fetch_deezer_chart_tracks, limit=max(canzoni * 3, 30)),
-                timeout=45,
-            )
+            if categoria:
+                genre_id = int(categoria)
+                try:
+                    genres = await asyncio.to_thread(fetch_deezer_genres)
+                    genre_name = next((g["name"] for g in genres if g["id"] == genre_id), "Pop")
+                except Exception:
+                    genre_name = "Pop"
+                tracks = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        fetch_random_tracks_by_category,
+                        genre_name,
+                        genre_id,
+                        limit=max(canzoni * 3, 30),
+                    ),
+                    timeout=45,
+                )
+            else:
+                tracks = await asyncio.wait_for(
+                    asyncio.to_thread(fetch_deezer_chart_tracks, limit=max(canzoni * 3, 30)),
+                    timeout=45,
+                )
         else:
+            if categoria:
+                await channel.send(
+                    "ℹ️ Il parametro `categoria` viene ignorato quando specifichi una `fonte` (playlist/brani)."
+                )
             tracks = await asyncio.wait_for(
                 asyncio.to_thread(fetch_tracks_from_source, fonte.strip(), spotify_provider),
                 timeout=45,
@@ -190,7 +232,7 @@ async def quiz_start(
         return
 
     if not tracks:
-        await channel.send("❌ Nessun brano trovato, annullo l'avvio.")
+        await channel.send("❌ Nessun brano trovato per questa categoria/fonte, annullo l'avvio.")
         return
 
     rounds = canzoni

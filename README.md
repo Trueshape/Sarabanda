@@ -78,8 +78,16 @@ parametri da compilare:
 - **canzoni** (obbligatorio): quante canzoni riprodurre, es. `10`
 - **modalita** (obbligatorio): scegli dal menu a tendina tra "Risposta aperta"
   o "Scelta multipla (4 opzioni numerate)"
-- **fonte** (opzionale): incolla un link di playlist Spotify o Deezer.
-  Lascia vuoto per canzoni casuali dalla classifica Deezer
+- **fonte** (opzionale): incolla un link **playlist o singola canzone** (Spotify,
+  Deezer o iTunes/Apple Music). Puoi anche incollare **più link separati da
+  virgola**, anche mescolando le tre fonti, per costruire un mini-quiz con
+  brani scelti a mano senza creare una playlist apposita (es.
+  `link_spotify, link_deezer, link_itunes`). Lascia vuoto per canzoni casuali
+  dalla classifica Deezer
+- **categoria** (opzionale, solo se `fonte` è vuoto): filtra le canzoni
+  casuali per genere musicale (Pop, Rock, Rap/Hip Hop, ecc.). Mentre scrivi,
+  Discord suggerisce le categorie reali disponibili su Deezer in quel
+  momento (autocomplete). Se lasci vuoto, usa la classifica globale
 - **durata** (opzionale): secondi per round, default 30
 
 Altri comandi:
@@ -112,12 +120,25 @@ Discord o attendi un paio di minuti.
   Se non hai Premium, **usa link Deezer o la modalità `casuale`** (basata
   sulla classifica Deezer), che funzionano sempre senza bisogno di alcun
   account o autenticazione.
-- **Riconoscimento automatico Spotify/Deezer**: quando incolli un link di
-  playlist, il bot riconosce da solo se è un link Spotify o Deezer in base
-  al dominio nell'URL, e usa l'API corrispondente. Per Deezer il preview
-  audio è già incluso nella risposta; per Spotify, se manca il
-  `preview_url`, il bot cerca automaticamente lo stesso brano su Deezer
-  come fallback.
+- **Riconoscimento automatico Spotify/Deezer/iTunes**: quando incolli un
+  link, il bot riconosce da solo il servizio in base al dominio nell'URL, e
+  usa l'API corrispondente. Per Deezer e iTunes il preview audio è già
+  incluso nella risposta; per Spotify, se manca il `preview_url`, il bot
+  cerca automaticamente lo stesso brano su Deezer come fallback.
+- **iTunes/Apple Music**: supportato solo per **brani singoli** (link diretto
+  a una canzone), non per playlist — non esiste un'API pubblica non
+  autenticata per leggere playlist utente da Apple Music.
+- **Categorie musicali**: la lista di generi nell'autocomplete di `categoria`
+  viene letta in tempo reale dall'API Deezer (`/genre`) e tenuta in cache
+  per un'ora. Quando scegli una categoria, il bot combina la classifica
+  Deezer filtrata per quel genere (fonte primaria e affidabile, ~70% dei
+  brani) con una ricerca iTunes per lo stesso nome di categoria (fonte
+  secondaria, per aggiungere varietà, ~30%). La ricerca iTunes per genere
+  è un'approssimazione (cerca il nome del genere come termine libero, non
+  un filtro di genere vero e proprio come quello di Deezer) perché iTunes
+  non offre un'API pubblica non autenticata con filtro di genere affidabile;
+  l'API completa di Apple Music con generi veri richiederebbe iscrizione
+  all'Apple Developer Program (a pagamento).
 - Ogni round dura al massimo `ROUND_DURATION_SECONDS` (default 30s, modificabile
   in `.env`), o termina prima se sia titolo che artista vengono indovinati.
 - I punteggi sono salvati in `data/scores_<id_server>.json`, uno per server.

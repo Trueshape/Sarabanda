@@ -26,7 +26,8 @@ accenti, "(feat. ...)", "[Remix]", piccoli refusi, ecc.
 3. Nella stessa sezione **Bot**, attiva **MESSAGE CONTENT INTENT** (obbligatorio,
    altrimenti il bot non può leggere le risposte in chat)
 4. Sezione **OAuth2 → URL Generator**:
-   - Scopes: `bot`
+   - Scopes: `bot` **e** `applications.commands` (quest'ultimo è necessario
+     per far apparire gli slash command `/quiz ...` nel server)
    - Permessi: `Send Messages`, `Connect`, `Speak`, `Read Message History`
    - Apri l'URL generato e invita il bot nel tuo server
 
@@ -57,43 +58,48 @@ python bot.py
 
 ## 6. Utilizzo in Discord
 
-Devi essere già connesso a un canale vocale prima di digitare `!quiz start`: il
+Devi essere già connesso a un canale vocale prima di lanciare `/quiz start`: il
 bot ti raggiunge lì automaticamente.
 
+⚠️ **Importante per gli slash command**: nel punto 2 (invito del bot), lo
+scope `applications.commands` deve essere selezionato insieme a `bot`
+nell'OAuth2 URL Generator, altrimenti gli slash command non appariranno nel
+server. Se hai già invitato il bot solo con lo scope `bot`, devi rigenerare
+il link di invito aggiungendo anche `applications.commands` e invitarlo di
+nuovo (non serve rimuoverlo prima, il reinvito aggiorna i permessi).
+
 ```
-!quiz start
+/quiz start
 ```
 
-Il bot ti farà 4 domande in chat, una alla volta (hai 60 secondi per rispondere
-a ciascuna):
+Digitando `/quiz start` Discord mostra direttamente un menu con tutti i
+parametri da compilare:
 
-1. **Quante canzoni** vuoi riprodurre → scrivi un numero, es. `10`
-2. **Playlist specifica o casuale?** → incolla il link di una playlist **Spotify o Deezer**
-   (il bot riconosce automaticamente da quale servizio proviene), oppure scrivi
-   `casuale` per pescare brani dalla classifica globale Deezer (nessun account
-   richiesto, sempre disponibile)
-3. **Modalità di gioco** → scrivi `aperta` (rispondi scrivendo liberamente
-   titolo/artista) oppure `scelta multipla` (rispondi con un numero da 4
-   opzioni mostrate in chat)
-4. **Durata di ogni round** in secondi → scrivi un numero, oppure `default`
-   per usare il valore in `.env` (30s)
-
-**Punteggi:**
-- Modalità **aperta**: primo a scrivere il titolo giusto → 2 punti, primo a
-  scrivere l'artista giusto → 1 punto (indipendenti tra loro)
-- Modalità **scelta multipla**: 4 opzioni numerate, primo a scrivere il numero
-  giusto → 3 punti (titolo+artista insieme)
+- **canzoni** (obbligatorio): quante canzoni riprodurre, es. `10`
+- **modalita** (obbligatorio): scegli dal menu a tendina tra "Risposta aperta"
+  o "Scelta multipla (4 opzioni numerate)"
+- **fonte** (opzionale): incolla un link di playlist Spotify o Deezer.
+  Lascia vuoto per canzoni casuali dalla classifica Deezer
+- **durata** (opzionale): secondi per round, default 30
 
 Altri comandi:
 
 ```
-!quiz classifica   # mostra la classifica generale in qualsiasi momento
-!quiz stop          # ferma il quiz in anticipo
-!quiz reset         # azzera la classifica del server
+/quiz classifica   # mostra la classifica generale in qualsiasi momento
+/quiz stop          # ferma il quiz in anticipo
+/quiz reset         # azzera la classifica del server
+/quiz help          # mostra l'aiuto
 ```
 
 Dopo ogni round, il bot rivela il brano e mostra automaticamente la
-**classifica generale aggiornata** in chat.
+**classifica generale aggiornata** in chat. Le risposte durante il quiz
+restano normali messaggi scritti in chat (non slash command).
+
+**Nota sulla sincronizzazione**: al primo avvio il bot registra gli slash
+command con Discord (operazione automatica, visibile nei log come "Slash
+command sincronizzati: N"). A volte Discord impiega qualche minuto a
+mostrare i comandi aggiornati nel client — se non li vedi subito, riavvia
+Discord o attendi un paio di minuti.
 
 ---
 

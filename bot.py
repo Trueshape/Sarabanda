@@ -215,9 +215,18 @@ async def quiz_start(ctx: commands.Context):
     await ctx.send("🔎 Preparo i brani, un attimo...")
     try:
         if source_choice.lower() == "casuale":
-            tracks = fetch_deezer_chart_tracks(limit=max(rounds * 3, 30))
+            tracks = await asyncio.wait_for(
+                asyncio.to_thread(fetch_deezer_chart_tracks, limit=max(rounds * 3, 30)),
+                timeout=45,
+            )
         else:
-            tracks = fetch_tracks_from_source(source_choice, spotify_provider)
+            tracks = await asyncio.wait_for(
+                asyncio.to_thread(fetch_tracks_from_source, source_choice, spotify_provider),
+                timeout=45,
+            )
+    except asyncio.TimeoutError:
+        await ctx.send("❌ Il recupero dei brani ha impiegato troppo tempo (rete lenta/irraggiungibile). Riprova con `!quiz start`.")
+        return
     except Exception as e:
         await ctx.send(f"❌ Errore nel recupero dei brani: `{e}`")
         return
@@ -365,7 +374,12 @@ async def pick_next_track(state: GuildGameState):
             break
         attempts += 1
         track = state.tracks[idx]
-        audio_url = resolve_playable_url(track)
+        try:
+            audio_url = await asyncio.wait_for(
+                asyncio.to_thread(resolve_playable_url, track), timeout=15
+            )
+        except asyncio.TimeoutError:
+            audio_url = None
         state.used_indexes.add(idx)
         if audio_url:
             return track, audio_url

@@ -1,42 +1,54 @@
 """
-Bot Discord per quiz musicali — comandi slash.
+Discord music quiz bot — slash commands.
 
-Comandi:
-  /quiz start   -> avvia il quiz, con TUTTI i parametri nel menu dello slash
-                   command stesso: canzoni, fonte (playlist o casuale),
-                   modalità, durata round
-  /quiz stop    -> ferma il quiz e disconnette il bot
-  /quiz classifica -> mostra la classifica del server
-  /quiz reset   -> azzera la classifica del server
-  /quiz help    -> mostra l'aiuto
+Commands:
+  /quiz start   -> start the quiz. ALL parameters are set directly in the
+                   slash command menu: songs, source (playlist/track links
+                   or random), category, artist, mode, round duration
+  /quiz stop    -> stop the quiz and disconnect the bot
+  /quiz leaderboard -> show the server's overall leaderboard
+  /quiz reset   -> reset the server's leaderboard
+  /quiz help    -> show help
 
-Regole punteggio:
-  - Modalità APERTA: primo a indovinare il TITOLO -> 2 punti,
-    primo a indovinare l'ARTISTA -> 1 punto (indipendenti, refusi/feat./ecc. ignorati)
-  - Modalità SCELTA MULTIPLA: 4 opzioni numerate, primo a scegliere il numero
-    corretto -> 3 punti (titolo+artista insieme)
-  - Dopo ogni round viene mostrata la classifica generale aggiornata
+Scoring rules:
+  - OPEN ANSWER mode: first to type the correct TITLE -> 2 points,
+    first to type the correct ARTIST -> 1 point (independent; typos,
+    "feat.", "(Remix)" etc. are ignored)
+  - MULTIPLE CHOICE mode: 4 buttons, one attempt per person. Answers are
+    ephemeral (only visible to the person who clicked), so nobody can spoil
+    the result for others. First correct click -> 3 points (title+artist
+    together). Wrong on your one attempt -> no points, no retry this round.
+    The round ends early once everyone currently in the voice channel has
+    answered, otherwise it waits for the full round duration.
+  - The overall leaderboard is shown after every round.
 """
 
 import asyncio
 import os
 import random
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
+import clemmy_schedule
 import scores
 from keep_alive import keep_alive
 from matching import any_artist_match, is_close_match
 from music_source import (
+    SPECIAL_CATEGORIES,
     SpotifyProvider,
     fetch_deezer_chart_tracks,
     fetch_deezer_genres,
     fetch_random_tracks_by_category,
+    fetch_special_category_tracks,
+    fetch_tracks_by_artist_name,
     fetch_tracks_from_source,
     resolve_playable_url,
+    search_deezer_artists,
 )
 
 load_dotenv()
@@ -56,11 +68,11 @@ spotify_provider: SpotifyProvider | None = None
 try:
     spotify_provider = SpotifyProvider()
 except RuntimeError as e:
-    print(f"[ATTENZIONE] {e}")
+    print(f"[WARNING] {e}")
 
 
 class GuildGameState:
-    """Stato del gioco per un singolo server."""
+    """Game state for a single server."""
 
     def __init__(self):
         self.tracks: list[dict] = []
@@ -73,16 +85,21 @@ class GuildGameState:
 
 
 class RoundState:
-    def __init__(self, track: dict, mode: str = "aperta"):
+    def __init__(self, track: dict, mode: str = "open_answer"):
         self.track = track
         self.title = track["name"]
         self.artists = track["artists"]
         self.title_awarded = False
         self.artist_awarded = False
         self.done_event = asyncio.Event()
-        self.mode = mode  # "aperta" oppure "scelta_multipla"
+        self.mode = mode  # "open_answer" or "multiple_choice"
         self.correct_number: int | None = None
         self.options: list[dict] | None = None
+        # Only used in multiple_choice mode (buttons):
+        self.answered_users: set[int] = set()  # who already clicked a button (1 attempt each)
+        self.expected_users: set[int] = set()  # who was in voice when the round started
+        self.view: "MultipleChoiceView | None" = None
+        self.message: discord.Message | None = None
 
 
 game_states: dict[int, GuildGameState] = {}
@@ -94,108 +111,286 @@ def get_state(guild_id: int) -> GuildGameState:
     return game_states[guild_id]
 
 
+class MultipleChoiceView(discord.ui.View):
+    """Buttons for multiple choice mode. Every answer is visible ONLY to the
+    person who clicked (ephemeral), so nobody can spoil the result for
+    others. One attempt per person: if you get it wrong, no more points for
+    this round (you can still see the outcome in the final reveal)."""
+
+    def __init__(self, round_state: RoundState, guild_id: int, timeout: float):
+        super().__init__(timeout=timeout)
+        self.round_state = round_state
+        self.guild_id = guild_id
+
+        for i, opt in enumerate(round_state.options):
+            label = f"{i + 1}) {opt['name']} — {', '.join(opt['artists'])}"
+            if len(label) > 80:
+                label = label[:77] + "..."
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
+            button.callback = self._make_callback(i + 1)
+            self.add_item(button)
+
+    def _make_callback(self, choice_number: int):
+        async def callback(interaction: discord.Interaction):
+            await self._handle_answer(interaction, choice_number)
+
+        return callback
+
+    async def _handle_answer(self, interaction: discord.Interaction, choice_number: int):
+        rs = self.round_state
+        user_id = interaction.user.id
+
+        if user_id in rs.answered_users:
+            await interaction.response.send_message(
+                "You've already answered this round — wait for the next song!",
+                ephemeral=True,
+            )
+            return
+
+        rs.answered_users.add(user_id)
+        is_correct = choice_number == rs.correct_number
+
+        if is_correct and not rs.title_awarded:
+            rs.title_awarded = True
+            rs.artist_awarded = True
+            scores.add_points(self.guild_id, user_id, str(interaction.user), 3)
+            await interaction.response.send_message(
+                "✅ Correct! +3 points (title+artist). Don't spoil it for the others 🤫",
+                ephemeral=True,
+            )
+        elif is_correct:
+            await interaction.response.send_message(
+                "✅ That was the right answer, but someone else was faster: no points this round.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                "❌ Wrong answer: no points this round (one attempt per person).",
+                ephemeral=True,
+            )
+
+        # If everyone who was in voice when the round started has now answered, end early
+        if rs.expected_users and rs.expected_users.issubset(rs.answered_users):
+            rs.done_event.set()
+
+    async def disable_all(self):
+        for item in self.children:
+            item.disabled = True
+        if self.round_state.message:
+            try:
+                await self.round_state.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+        self.stop()
+
+
 @bot.event
 async def on_ready():
-    print(f"Bot connesso come {bot.user}")
+    print(f"Bot logged in as {bot.user}")
     try:
         synced = await bot.tree.sync()
-        print(f"Slash command sincronizzati: {len(synced)}")
+        print(f"Synced {len(synced)} slash command(s)")
     except Exception as e:
-        print(f"[ATTENZIONE] Errore nella sincronizzazione degli slash command: {e}")
+        print(f"[WARNING] Failed to sync slash commands: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Gruppo slash command "/quiz"
+# Unrelated standalone commands: Clemmy's weekly work schedule
+# (nothing to do with the music quiz, just bolted onto the same bot)
 # ---------------------------------------------------------------------------
 
-quiz_group = app_commands.Group(name="quiz", description="Comandi del quiz musicale")
+ROME_TZ = ZoneInfo("Europe/Rome")
+
+
+@bot.tree.command(name="edit_settimana", description="Set which days of the week Clemmy is at work")
+@app_commands.describe(
+    lunedi="Is Clemmy at work on Monday?",
+    martedi="Is Clemmy at work on Tuesday?",
+    mercoledi="Is Clemmy at work on Wednesday?",
+    giovedi="Is Clemmy at work on Thursday?",
+    venerdi="Is Clemmy at work on Friday?",
+    sabato="Is Clemmy at work on Saturday?",
+    domenica="Is Clemmy at work on Sunday?",
+)
+async def edit_settimana(
+    interaction: discord.Interaction,
+    lunedi: bool = None,
+    martedi: bool = None,
+    mercoledi: bool = None,
+    giovedi: bool = None,
+    venerdi: bool = None,
+    sabato: bool = None,
+    domenica: bool = None,
+):
+    updates = {
+        "lunedi": lunedi,
+        "martedi": martedi,
+        "mercoledi": mercoledi,
+        "giovedi": giovedi,
+        "venerdi": venerdi,
+        "sabato": sabato,
+        "domenica": domenica,
+    }
+
+    if all(v is None for v in updates.values()):
+        schedule = clemmy_schedule.get_schedule(interaction.guild.id)
+    else:
+        schedule = clemmy_schedule.update_schedule(interaction.guild.id, updates)
+
+    lines = "\n".join(
+        f"{'✅' if schedule[day] else '❌'} {day.capitalize()}"
+        for day in clemmy_schedule.WEEKDAY_KEYS
+    )
+    await interaction.response.send_message(f"📅 Orario settimanale di Clemmy:\n{lines}")
+
+
+@bot.tree.command(name="oggyclemmy", description="Controlla se oggi Clemmy è al lavoro")
+async def oggyclemmy(interaction: discord.Interaction):
+    today_weekday = datetime.now(ROME_TZ).weekday()  # 0=Monday ... 6=Sunday
+    working = clemmy_schedule.is_working_today(interaction.guild.id, today_weekday)
+
+    if working:
+        await interaction.response.send_message("Oggi si lavora e si fattura")
+    else:
+        await interaction.response.send_message("Sì è a casa, GOGOGO")
+
+
+# ---------------------------------------------------------------------------
+# "/quiz" slash command group
+# ---------------------------------------------------------------------------
+
+quiz_group = app_commands.Group(name="quiz", description="Music quiz commands")
 bot.tree.add_command(quiz_group)
 
 
 def help_embed() -> discord.Embed:
     return discord.Embed(
-        title="🎵 Quiz Musicale — Comandi",
+        title="🎵 Music Quiz — Commands",
         color=discord.Color.blurple(),
         description=(
-            "`/quiz start` — avvia il quiz: scegli canzoni, fonte, modalità e "
-            "durata round direttamente nel menu dello slash command\n"
-            "`/quiz stop` — ferma il quiz\n"
-            "`/quiz classifica` — mostra la classifica\n"
-            "`/quiz reset` — azzera la classifica\n\n"
-            "**Modalità aperta:** chi indovina il **titolo** per primo prende **2 punti**, "
-            "chi indovina l'**artista** per primo prende **1 punto**.\n"
-            "**Modalità scelta multipla:** 4 opzioni numerate, chi indovina il numero "
-            "corretto per primo prende **3 punti**.\n"
-            "Piccoli refusi, maiuscole/minuscole, 'feat.', '(Remix)' ecc. vengono ignorati.\n"
-            "Dopo ogni round vedrai la classifica generale aggiornata."
+            "`/quiz start` — start the quiz: pick songs, source, category, "
+            "artist, mode and round duration right in the slash command menu\n"
+            "`/quiz stop` — stop the quiz\n"
+            "`/quiz leaderboard` — show the leaderboard\n"
+            "`/quiz reset` — reset the leaderboard\n\n"
+            "**Open answer mode:** first to type the **title** gets **2 points**, "
+            "first to type the **artist** gets **1 point**.\n"
+            "**Multiple choice mode:** 4 buttons, one attempt each. First correct "
+            "click gets **3 points**. Answers are private (ephemeral) until the "
+            "round ends, so nobody spoils it for anyone else.\n"
+            "Small typos, casing, 'feat.', '(Remix)' etc. are ignored.\n"
+            "The overall leaderboard is shown after every round."
         ),
     )
 
 
-@quiz_group.command(name="help", description="Mostra l'aiuto del quiz musicale")
+@quiz_group.command(name="help", description="Show help for the music quiz")
 async def quiz_help(interaction: discord.Interaction):
     await interaction.response.send_message(embed=help_embed())
 
 
-async def categoria_autocomplete(
+async def category_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
+    current_lower = current.lower()
+
     try:
         genres = await asyncio.to_thread(fetch_deezer_genres)
     except Exception:
         genres = []
 
-    current_lower = current.lower()
-    matches = [g for g in genres if current_lower in g["name"].lower()]
-    return [
-        app_commands.Choice(name=g["name"], value=str(g["id"]))
-        for g in matches[:25]
+    choices = [
+        app_commands.Choice(name=g["name"], value=f"genre:{g['id']}")
+        for g in genres
+        if current_lower in g["name"].lower()
     ]
 
+    choices += [
+        app_commands.Choice(name=info["label"], value=f"special:{key}")
+        for key, info in SPECIAL_CATEGORIES.items()
+        if current_lower in info["label"].lower()
+    ]
 
-@quiz_group.command(name="start", description="Avvia il quiz musicale")
+    return choices[:25]
+
+
+async def artist_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    if not current or len(current.strip()) < 2:
+        return []
+    try:
+        candidates = await asyncio.to_thread(search_deezer_artists, current.strip(), 15)
+    except Exception:
+        candidates = []
+    return [app_commands.Choice(name=c["name"], value=c["name"]) for c in candidates[:25]]
+
+
+@quiz_group.command(name="start", description="Start the music quiz")
 @app_commands.describe(
-    canzoni="Quante canzoni riprodurre (es. 10)",
-    modalita="Come si risponde: scrivendo liberamente o scegliendo tra 4 opzioni",
-    fonte="Link Spotify/Deezer/iTunes (playlist, brano singolo, o più link separati da virgola). Vuoto = casuale",
-    categoria="Categoria musicale (solo se 'fonte' è vuoto): filtra le canzoni casuali per genere",
-    durata="Durata di ogni round in secondi (default 30)",
+    songs="How many songs to play (e.g. 10)",
+    mode="How answers work: type freely, or pick from 4 buttons",
+    source="Spotify/Deezer/iTunes link (playlist, single track, or multiple links separated by commas). Empty = random",
+    category="Genre or special category (decades, J-Pop, K-Pop, anime, etc). Ignored if you use 'source' or 'artist'",
+    artist="A specific artist's name (typo-tolerant). Ignored if you use 'source'",
+    duration="Duration of each round in seconds (default 30)",
 )
 @app_commands.choices(
-    modalita=[
-        app_commands.Choice(name="Risposta aperta (scrivi titolo/artista)", value="aperta"),
-        app_commands.Choice(name="Scelta multipla (4 opzioni numerate)", value="scelta_multipla"),
+    mode=[
+        app_commands.Choice(name="Open answer (type title/artist)", value="open_answer"),
+        app_commands.Choice(name="Multiple choice (4 buttons)", value="multiple_choice"),
     ]
 )
-@app_commands.autocomplete(categoria=categoria_autocomplete)
+@app_commands.autocomplete(category=category_autocomplete, artist=artist_autocomplete)
 async def quiz_start(
     interaction: discord.Interaction,
-    canzoni: app_commands.Range[int, 1, 100],
-    modalita: app_commands.Choice[str],
-    fonte: str = None,
-    categoria: str = None,
-    durata: app_commands.Range[int, 5, 120] = ROUND_DURATION,
+    songs: app_commands.Range[int, 1, 100],
+    mode: app_commands.Choice[str],
+    source: str = None,
+    category: str = None,
+    artist: str = None,
+    duration: app_commands.Range[int, 5, 120] = ROUND_DURATION,
 ):
     state = get_state(interaction.guild.id)
-    game_mode = modalita.value
+    game_mode = mode.value
 
     if state.active:
-        await interaction.response.send_message("⚠️ Il quiz è già in corso in questo server.")
+        await interaction.response.send_message("⚠️ A quiz is already running in this server.")
         return
 
     member = interaction.user
     if not member.voice or not member.voice.channel:
-        await interaction.response.send_message("❌ Devi essere in un canale vocale per avviare il quiz.")
+        await interaction.response.send_message("❌ You need to be in a voice channel to start the quiz.")
         return
 
-    # Ack immediato (Discord richiede una risposta entro 3 secondi)
-    await interaction.response.send_message("🔎 Preparo i brani, un attimo...")
+    # Immediate ack (Discord requires a response within 3 seconds)
+    await interaction.response.send_message("🔎 Getting the songs ready, one moment...")
     channel = interaction.channel
 
     try:
-        if not fonte or fonte.strip().lower() == "casuale":
-            if categoria:
-                genre_id = int(categoria)
+        if source and source.strip().lower() != "random":
+            if category or artist:
+                await channel.send(
+                    "ℹ️ The `category`/`artist` parameters are ignored when you specify a `source` (playlist/tracks)."
+                )
+            tracks = await asyncio.wait_for(
+                asyncio.to_thread(fetch_tracks_from_source, source.strip(), spotify_provider),
+                timeout=45,
+            )
+        elif artist:
+            tracks = await asyncio.wait_for(
+                asyncio.to_thread(fetch_tracks_by_artist_name, artist.strip(), limit=max(songs * 3, 30)),
+                timeout=45,
+            )
+        elif category:
+            if category.startswith("special:"):
+                key = category.split(":", 1)[1]
+                tracks = await asyncio.wait_for(
+                    asyncio.to_thread(fetch_special_category_tracks, key, limit=max(songs * 3, 30)),
+                    timeout=45,
+                )
+            else:
+                genre_id = int(category.split(":", 1)[1]) if category.startswith("genre:") else int(category)
                 try:
                     genres = await asyncio.to_thread(fetch_deezer_genres)
                     genre_name = next((g["name"] for g in genres if g["id"] == genre_id), "Pop")
@@ -206,39 +401,30 @@ async def quiz_start(
                         fetch_random_tracks_by_category,
                         genre_name,
                         genre_id,
-                        limit=max(canzoni * 3, 30),
+                        limit=max(songs * 3, 30),
                     ),
                     timeout=45,
                 )
-            else:
-                tracks = await asyncio.wait_for(
-                    asyncio.to_thread(fetch_deezer_chart_tracks, limit=max(canzoni * 3, 30)),
-                    timeout=45,
-                )
         else:
-            if categoria:
-                await channel.send(
-                    "ℹ️ Il parametro `categoria` viene ignorato quando specifichi una `fonte` (playlist/brani)."
-                )
             tracks = await asyncio.wait_for(
-                asyncio.to_thread(fetch_tracks_from_source, fonte.strip(), spotify_provider),
+                asyncio.to_thread(fetch_deezer_chart_tracks, limit=max(songs * 3, 30)),
                 timeout=45,
             )
     except asyncio.TimeoutError:
-        await channel.send("❌ Il recupero dei brani ha impiegato troppo tempo (rete lenta/irraggiungibile). Riprova con `/quiz start`.")
+        await channel.send("❌ Fetching songs took too long (slow/unreachable network). Try `/quiz start` again.")
         return
     except Exception as e:
-        await channel.send(f"❌ Errore nel recupero dei brani: `{e}`")
+        await channel.send(f"❌ Error while fetching songs: `{e}`")
         return
 
     if not tracks:
-        await channel.send("❌ Nessun brano trovato per questa categoria/fonte, annullo l'avvio.")
+        await channel.send("❌ No songs found for this category/artist/source, aborting startup.")
         return
 
-    rounds = canzoni
+    rounds = songs
     if len(tracks) < rounds:
         await channel.send(
-            f"⚠️ Ho trovato solo {len(tracks)} brani disponibili: farò {len(tracks)} round invece di {rounds}."
+            f"⚠️ I only found {len(tracks)} available songs: I'll do {len(tracks)} round(s) instead of {rounds}."
         )
         rounds = len(tracks)
 
@@ -253,18 +439,18 @@ async def quiz_start(
 
     state.text_channel = channel
     state.active = True
-    state.task = asyncio.create_task(run_quiz(interaction.guild.id, rounds, durata, game_mode))
-    mode_label = "risposta aperta" if game_mode == "aperta" else "scelta multipla (4 opzioni)"
+    state.task = asyncio.create_task(run_quiz(interaction.guild.id, rounds, duration, game_mode))
+    mode_label = "open answer" if game_mode == "open_answer" else "multiple choice (4 buttons)"
     await channel.send(
-        f"🎬 Quiz avviato: **{rounds} round**, **{durata}s** a round, modalità **{mode_label}**. Preparatevi!"
+        f"🎬 Quiz started: **{rounds} round(s)**, **{duration}s** per round, **{mode_label}** mode. Get ready!"
     )
 
 
-@quiz_group.command(name="stop", description="Ferma il quiz in corso")
+@quiz_group.command(name="stop", description="Stop the current quiz")
 async def quiz_stop(interaction: discord.Interaction):
     state = get_state(interaction.guild.id)
     if not state.active:
-        await interaction.response.send_message("Non c'è nessun quiz in corso.")
+        await interaction.response.send_message("There's no quiz running right now.")
         return
 
     state.active = False
@@ -272,36 +458,36 @@ async def quiz_stop(interaction: discord.Interaction):
         state.round_state.done_event.set()
     if state.task:
         state.task.cancel()
-    await interaction.response.send_message("🛑 Quiz fermato.")
+    await interaction.response.send_message("🛑 Quiz stopped.")
 
 
-@quiz_group.command(name="classifica", description="Mostra la classifica generale del server")
-async def quiz_classifica(interaction: discord.Interaction):
+@quiz_group.command(name="leaderboard", description="Show the server's overall leaderboard")
+async def quiz_leaderboard(interaction: discord.Interaction):
     top = scores.leaderboard(interaction.guild.id)
     if not top:
-        await interaction.response.send_message("Nessun punteggio registrato ancora.")
+        await interaction.response.send_message("No scores recorded yet.")
         return
     lines = "\n".join(
-        f"{i+1}. **{name}** — {points} punti" for i, (name, points) in enumerate(top)
+        f"{i+1}. **{name}** — {points} point(s)" for i, (name, points) in enumerate(top)
     )
-    await interaction.response.send_message(f"🏆 Classifica:\n{lines}")
+    await interaction.response.send_message(f"🏆 Leaderboard:\n{lines}")
 
 
-@quiz_group.command(name="reset", description="Azzera la classifica del server")
+@quiz_group.command(name="reset", description="Reset the server's leaderboard")
 async def quiz_reset(interaction: discord.Interaction):
     scores.reset(interaction.guild.id)
-    await interaction.response.send_message("🔄 Classifica azzerata.")
+    await interaction.response.send_message("🔄 Leaderboard reset.")
 
 
 # ---------------------------------------------------------------------------
-# Logica di gioco (invariata: round, riproduzione, ascolto risposte in chat)
+# Game loop: rounds, playback, waiting for answers
 # ---------------------------------------------------------------------------
 
 async def run_quiz(
     guild_id: int,
     rounds: int,
     round_duration: int = ROUND_DURATION,
-    game_mode: str = "aperta",
+    game_mode: str = "open_answer",
 ):
     state = get_state(guild_id)
     channel = state.text_channel
@@ -313,7 +499,7 @@ async def run_quiz(
 
             track, audio_url = await pick_next_track(state)
             if track is None:
-                await channel.send("⚠️ Non ho trovato altri brani riproducibili disponibili, mi fermo qui.")
+                await channel.send("⚠️ No more playable songs found, stopping here.")
                 break
 
             round_state = RoundState(track, mode=game_mode)
@@ -321,30 +507,37 @@ async def run_quiz(
 
             artists_display = ", ".join(track["artists"])
 
-            if game_mode == "scelta_multipla":
+            if game_mode == "multiple_choice":
                 options, correct_number = build_multiple_choice_options(track, state.tracks)
                 round_state.options = options
                 round_state.correct_number = correct_number
-                options_lines = "\n".join(
-                    f"**{i+1})** {opt['name']} — {', '.join(opt['artists'])}"
-                    for i, opt in enumerate(options)
+
+                if state.voice_client and state.voice_client.channel:
+                    round_state.expected_users = {
+                        m.id for m in state.voice_client.channel.members if not m.bot
+                    }
+
+                view = MultipleChoiceView(round_state, guild_id, timeout=round_duration + 5)
+                round_state.view = view
+
+                message = await channel.send(
+                    f"🎧 **Round {round_number}/{rounds}** — now playing!\n"
+                    f"Click the button with what you think is the correct answer. "
+                    f"Your answer is private — nobody else will see it until the round ends.",
+                    view=view,
                 )
-                await channel.send(
-                    f"🎧 **Round {round_number}/{rounds}** — in riproduzione!\n"
-                    f"{options_lines}\n"
-                    f"Rispondi con il **numero** corretto in chat! (vale 3 punti)"
-                )
+                round_state.message = message
             else:
                 await channel.send(
-                    f"🎧 **Round {round_number}/{rounds}** — in riproduzione! "
-                    f"Scrivi il **titolo** (+2) e l'**artista** (+1) qui in chat."
+                    f"🎧 **Round {round_number}/{rounds}** — now playing! "
+                    f"Type the **title** (+2) and the **artist** (+1) here in chat."
                 )
 
             try:
-                source = discord.FFmpegPCMAudio(audio_url)
-                state.voice_client.play(source)
+                audio_source = discord.FFmpegPCMAudio(audio_url)
+                state.voice_client.play(audio_source)
             except Exception as e:
-                await channel.send(f"⚠️ Errore riproduzione, salto il brano: `{e}`")
+                await channel.send(f"⚠️ Playback error, skipping this song: `{e}`")
                 continue
 
             try:
@@ -355,20 +548,23 @@ async def run_quiz(
             if state.voice_client and state.voice_client.is_playing():
                 state.voice_client.stop()
 
-            reveal = f"⏱️ Tempo! Il brano era: **{track['name']}** — {artists_display}"
+            if round_state.view:
+                await round_state.view.disable_all()
+
+            reveal = f"⏱️ Time's up! The song was: **{track['name']}** — {artists_display}"
             if not round_state.title_awarded and not round_state.artist_awarded:
-                reveal += "\nNessuno ha indovinato questo giro 😅"
+                reveal += "\nNobody got it this round 😅"
             await channel.send(reveal)
 
-            # Classifica generale aggiornata dopo ogni round
+            # Updated overall leaderboard after every round
             top = scores.leaderboard(guild_id)
             if top:
                 lines = "\n".join(
-                    f"{i+1}. **{name}** — {points} punti" for i, (name, points) in enumerate(top)
+                    f"{i+1}. **{name}** — {points} point(s)" for i, (name, points) in enumerate(top)
                 )
-                await channel.send(f"📊 Classifica generale:\n{lines}")
+                await channel.send(f"📊 Overall leaderboard:\n{lines}")
             else:
-                await channel.send("📊 Nessun punto ancora assegnato.")
+                await channel.send("📊 No points scored yet.")
 
             state.round_state = None
             await asyncio.sleep(SECONDS_BETWEEN_ROUNDS)
@@ -384,12 +580,12 @@ async def run_quiz(
             state.voice_client = None
 
         if channel:
-            await channel.send("🏁 Quiz terminato! Grazie per aver giocato 🎶")
+            await channel.send("🏁 Quiz finished! Thanks for playing 🎶")
 
 
 def build_multiple_choice_options(track: dict, all_tracks: list[dict]):
-    """Costruisce fino a 4 opzioni (1 corretta + fino a 3 'distrattori' presi
-    dagli altri brani della sessione), mescolate. Ritorna (options, correct_number)."""
+    """Builds up to 4 options (1 correct + up to 3 'decoys' taken from the
+    other tracks in this session), shuffled. Returns (options, correct_number)."""
     decoy_pool = [t for t in all_tracks if t is not track]
     random.shuffle(decoy_pool)
     decoys = decoy_pool[:3]
@@ -402,7 +598,7 @@ def build_multiple_choice_options(track: dict, all_tracks: list[dict]):
 
 
 async def pick_next_track(state: GuildGameState):
-    """Sceglie un brano non ancora usato con audio riproducibile (Spotify o fallback Deezer)."""
+    """Picks a track not used yet with playable audio (Spotify or Deezer fallback)."""
     remaining = [i for i in range(len(state.tracks)) if i not in state.used_indexes]
     random.shuffle(remaining)
 
@@ -426,7 +622,7 @@ async def pick_next_track(state: GuildGameState):
 
 
 # ---------------------------------------------------------------------------
-# Ascolto delle risposte al quiz (restano normali messaggi in chat, non slash)
+# Listening for answers in open_answer mode (multiple_choice uses buttons)
 # ---------------------------------------------------------------------------
 
 @bot.event
@@ -437,43 +633,28 @@ async def on_message(message: discord.Message):
     state = get_state(message.guild.id)
     round_state = state.round_state
 
-    if round_state:
+    if round_state and round_state.mode == "open_answer":
         text = message.content.strip()
+        awarded_something = False
 
-        if round_state.mode == "scelta_multipla":
-            if (
-                not (round_state.title_awarded and round_state.artist_awarded)
-                and text.isdigit()
-                and int(text) == round_state.correct_number
-            ):
-                round_state.title_awarded = True
-                round_state.artist_awarded = True
-                scores.add_points(message.guild.id, message.author.id, str(message.author), 3)
-                await message.channel.send(
-                    f"✅ {message.author.mention} ha indovinato! +3 punti (titolo+artista)"
-                )
-                round_state.done_event.set()
-        else:
-            awarded_something = False
+        if not round_state.title_awarded and is_close_match(text, round_state.title):
+            round_state.title_awarded = True
+            scores.add_points(message.guild.id, message.author.id, str(message.author), 2)
+            await message.channel.send(f"✅ {message.author.mention} got the **title**! +2 points")
+            awarded_something = True
 
-            if not round_state.title_awarded and is_close_match(text, round_state.title):
-                round_state.title_awarded = True
-                scores.add_points(message.guild.id, message.author.id, str(message.author), 2)
-                await message.channel.send(f"✅ {message.author.mention} ha indovinato il **titolo**! +2 punti")
-                awarded_something = True
+        if not round_state.artist_awarded and any_artist_match(text, round_state.artists):
+            round_state.artist_awarded = True
+            scores.add_points(message.guild.id, message.author.id, str(message.author), 1)
+            await message.channel.send(f"✅ {message.author.mention} got the **artist**! +1 point")
+            awarded_something = True
 
-            if not round_state.artist_awarded and any_artist_match(text, round_state.artists):
-                round_state.artist_awarded = True
-                scores.add_points(message.guild.id, message.author.id, str(message.author), 1)
-                await message.channel.send(f"✅ {message.author.mention} ha indovinato l'**artista**! +1 punto")
-                awarded_something = True
-
-            if awarded_something and round_state.title_awarded and round_state.artist_awarded:
-                round_state.done_event.set()
+        if awarded_something and round_state.title_awarded and round_state.artist_awarded:
+            round_state.done_event.set()
 
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        raise RuntimeError("DISCORD_TOKEN mancante nel file .env")
-    keep_alive()  # no-op innocuo se non sei su Render; necessario per il free tier
+        raise RuntimeError("DISCORD_TOKEN missing from the .env file")
+    keep_alive()  # harmless no-op if you're not on Render; required for the free tier
     bot.run(DISCORD_TOKEN)

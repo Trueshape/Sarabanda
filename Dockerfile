@@ -1,7 +1,7 @@
-# Immagine leggera con Python 3.12
+# Lightweight image with Python 3.12
 FROM python:3.12-slim
 
-# ffmpeg è necessario per riprodurre audio nel canale vocale Discord
+# ffmpeg is required to play audio in the Discord voice channel
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg && \
     apt-get clean && \
@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
 COPY . .
 
-# Render assegna la porta tramite la variabile d'ambiente $PORT
+# Render assigns the port via the $PORT environment variable
 ENV PORT=10000
 EXPOSE 10000
 

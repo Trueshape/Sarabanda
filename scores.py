@@ -1,4 +1,4 @@
-"""Persistenza semplice dei punteggi, un file JSON per ogni server Discord."""
+"""Simple score persistence, one JSON file per Discord server."""
 
 import json
 import os
@@ -32,7 +32,7 @@ def add_points(guild_id: int, user_id: int, username: str, points: int) -> None:
     key = str(user_id)
     if key not in data:
         data[key] = {"username": username, "points": 0}
-    data[key]["username"] = username  # tieni aggiornato il nome
+    data[key]["username"] = username  # keep the display name up to date
     data[key]["points"] += points
     save(guild_id, data)
 

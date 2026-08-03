@@ -1,12 +1,12 @@
 """
-Mini server web usato SOLO per Render (piano free).
+Small web server used ONLY for Render (free plan).
 
-Render spegne i Web Service gratuiti dopo ~15 minuti senza richieste HTTP.
-Questo modulo espone un endpoint "/" che risponde OK; un cron job esterno
-(es. cron-job.org, UptimeRobot) lo chiama ogni 10 minuti per tenere il
-servizio sveglio, così il bot Discord resta connesso 24/7.
+Render puts free Web Services to sleep after ~15 minutes without HTTP
+requests. This module exposes a "/" endpoint that responds OK; an external
+cron job (e.g. cron-job.org, UptimeRobot) calls it every 10 minutes to keep
+the service awake, so the Discord bot stays connected 24/7.
 
-Se non usi Render (es. VPS, PC sempre acceso) puoi ignorare questo file.
+If you're not using Render (e.g. a VPS, an always-on PC) you can ignore this file.
 """
 
 import os
@@ -19,7 +19,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Il bot per il quiz musicale è vivo! 🎵"
+    return "The music quiz bot is alive! 🎵"
 
 
 def _run():
@@ -28,6 +28,6 @@ def _run():
 
 
 def keep_alive():
-    """Avvia il server Flask in un thread separato, senza bloccare il bot Discord."""
+    """Starts the Flask server in a separate thread, without blocking the Discord bot."""
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

@@ -1,15 +1,14 @@
 """
-Recupero brani da tre fonti:
-- Spotify (Client Credentials Flow) per playlist / brani singoli / metadati.
-  NB: da policy recenti Spotify richiede che l'account proprietario
-  dell'app abbia un abbonamento Premium per poter leggere dati via API;
-  senza Premium le richieste falliscono con 403.
-- Deezer (API pubblica, nessuna autenticazione richiesta) per playlist e
-  brani singoli Deezer, per il fallback audio quando manca il preview
-  Spotify, per la modalità "casuale" (chart Deezer, anche filtrata per
-  categoria/genere musicale).
-- iTunes/Apple (API pubblica Lookup, nessuna autenticazione richiesta) per
-  brani singoli iTunes/Apple Music.
+Track fetching from three sources:
+- Spotify (Client Credentials Flow) for playlists / single tracks / metadata.
+  NOTE: due to a recent Spotify policy change, the account that owns the app
+  needs an active Premium subscription to read data via the API; without
+  Premium, requests fail with a 403.
+- Deezer (public API, no authentication required) for Deezer playlists and
+  single tracks, for the audio fallback when Spotify has no preview, and
+  for "random" mode (Deezer chart, optionally filtered by genre/category).
+- iTunes/Apple (public Lookup API, no authentication required) for single
+  iTunes/Apple Music tracks.
 """
 
 import os
@@ -19,13 +18,32 @@ import time
 
 import requests
 import spotipy
+from rapidfuzz import fuzz
 from spotipy.oauth2 import SpotifyClientCredentials
 
-# Pool di playlist editoriali pubbliche di Spotify, usate per pescare
-# canzoni "casuali" quando l'utente non fornisce una playlist specifica.
-# Sono ID stabili di playlist ufficiali Spotify, coprono generi/epoche diverse
-# per dare varietà. Se in futuro uno di questi ID non fosse più valido,
-# viene semplicemente ignorato (try/except per playlist).
+# "Special" categories that don't map to a direct Deezer genre: resolved by
+# searching for a relevant public Deezer playlist via the playlist search API
+# (no fragile hardcoded IDs).
+SPECIAL_CATEGORIES = {
+    "decade_70s": {"label": "70s", "query": "70s hits"},
+    "decade_80s": {"label": "80s", "query": "80s hits"},
+    "decade_90s": {"label": "90s", "query": "90s hits"},
+    "decade_00s": {"label": "2000s", "query": "2000s hits"},
+    "decade_10s": {"label": "2010s", "query": "2010s hits"},
+    "decade_20s": {"label": "2020s", "query": "2020s hits"},
+    "recent_hits": {"label": "Recent Hits", "query": "Hot Hits"},
+    "trending_now": {"label": "Trending Now", "query": "Trending Now"},
+    "jpop": {"label": "J-Pop", "query": "J-Pop"},
+    "jrock": {"label": "J-Rock", "query": "J-Rock"},
+    "kpop": {"label": "K-Pop", "query": "K-Pop"},
+    "anime": {"label": "Anime", "query": "Anime"},
+}
+
+# Pool of public Spotify editorial playlists, used to pick "random" songs
+# when the user doesn't provide their own playlist. These are stable
+# official Spotify playlist IDs covering different genres/eras for variety.
+# If one of these IDs stops being valid in the future, it's simply skipped
+# (try/except per playlist).
 RANDOM_POOL_PLAYLISTS = [
     "37i9dQZF1DXcBWIGoYBM5M",  # Today's Top Hits
     "37i9dQZEVXbMDoHDwVN2tF",  # Top 50 Global
@@ -44,7 +62,7 @@ class SpotifyProvider:
         client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
         if not client_id or not client_secret:
             raise RuntimeError(
-                "SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET mancanti nel file .env"
+                "SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET missing from the .env file"
             )
         auth_manager = SpotifyClientCredentials(
             client_id=client_id, client_secret=client_secret
@@ -58,7 +76,7 @@ class SpotifyProvider:
         return playlist_url_or_id.strip()
 
     def fetch_tracks(self, playlist_url_or_id: str, limit: int = 300) -> list[dict]:
-        """Ritorna una lista di dict: {name, artists: [...], preview_url}."""
+        """Returns a list of dicts: {name, artists: [...], preview_url}."""
         playlist_id = self.extract_playlist_id(playlist_url_or_id)
         tracks = []
         results = self.sp.playlist_items(playlist_id, additional_types=["track"])
@@ -91,20 +109,20 @@ class SpotifyProvider:
         return track_url_or_id.strip()
 
     def fetch_single_track(self, track_url_or_id: str) -> dict:
-        """Legge un singolo brano Spotify. Ritorna un dict {name, artists, preview_url}."""
+        """Reads a single Spotify track. Returns {name, artists, preview_url}."""
         track_id = self.extract_track_id(track_url_or_id)
         t = self.sp.track(track_id)
         name = t.get("name")
         artists = [a["name"] for a in t.get("artists", []) if a.get("name")]
         preview_url = t.get("preview_url")
         if not name or not artists:
-            raise RuntimeError("Brano Spotify non valido o non trovato.")
+            raise RuntimeError("Invalid or not-found Spotify track.")
         return {"name": name, "artists": artists, "preview_url": preview_url}
 
     def fetch_random_tracks(self, limit: int = 30, source_playlists: int = 3) -> list[dict]:
-        """Pesca canzoni casuali da un pool di playlist editoriali Spotify
-        (varie epoche/generi), utile quando l'utente non specifica una
-        playlist propria. Ritorna una lista mescolata di brani unici."""
+        """Picks random songs from a pool of Spotify editorial playlists
+        (various eras/genres), useful when the user doesn't specify their
+        own playlist. Returns a shuffled list of unique tracks."""
         chosen_playlists = random.sample(
             RANDOM_POOL_PLAYLISTS, k=min(source_playlists, len(RANDOM_POOL_PLAYLISTS))
         )
@@ -139,9 +157,9 @@ def is_itunes_source(source: str) -> bool:
 
 
 def extract_itunes_track_id(source: str) -> str:
-    """Estrae l'ID brano da un link Apple Music/iTunes. Gestisce sia il
-    formato con query string ?i=ID (canzone dentro un album) sia il formato
-    con l'ID come ultimo segmento del path (link diretto alla canzone)."""
+    """Extracts the track ID from an Apple Music/iTunes link. Handles both
+    the query-string format ?i=ID (song inside an album context) and the
+    format where the ID is the last path segment (direct song link)."""
     match = re.search(r"[?&]i=(\d+)", source)
     if match:
         return match.group(1)
@@ -152,8 +170,8 @@ def extract_itunes_track_id(source: str) -> str:
 
 
 def fetch_itunes_single_track(track_url_or_id: str) -> dict:
-    """Legge un singolo brano iTunes/Apple Music tramite la Lookup API
-    pubblica (nessuna autenticazione richiesta)."""
+    """Reads a single iTunes/Apple Music track via the public Lookup API
+    (no authentication required)."""
     track_id = extract_itunes_track_id(track_url_or_id)
     resp = requests.get(
         "https://itunes.apple.com/lookup",
@@ -165,23 +183,22 @@ def fetch_itunes_single_track(track_url_or_id: str) -> dict:
 
     results = payload.get("results", [])
     if not results:
-        raise RuntimeError("Brano iTunes non trovato.")
+        raise RuntimeError("iTunes track not found.")
 
     item = results[0]
     name = item.get("trackName")
     artist_name = item.get("artistName")
     preview_url = item.get("previewUrl")
     if not name or not artist_name:
-        raise RuntimeError("Brano iTunes non valido.")
+        raise RuntimeError("Invalid iTunes track.")
     return {"name": name, "artists": [artist_name], "preview_url": preview_url}
 
 
-def fetch_itunes_tracks_by_term(term: str, limit: int = 25, country: str = "IT") -> list[dict]:
-    """Cerca brani su iTunes tramite un termine libero (es. il nome di un
-    genere: 'Pop', 'Rock', ecc.). NB: non è un vero filtro di genere come
-    quello di Deezer — la Search API di iTunes non lo supporta in modo
-    affidabile — ma un'approssimazione utile per aggiungere varietà quando
-    si sceglie una categoria musicale."""
+def fetch_itunes_tracks_by_term(term: str, limit: int = 25, country: str = "US") -> list[dict]:
+    """Searches iTunes with a free-text term (e.g. a genre name: 'Pop',
+    'Rock', etc.). NOTE: this is not a true genre filter like Deezer's — the
+    iTunes Search API doesn't reliably support that — but it's a useful
+    approximation to add variety when a music category is selected."""
     resp = requests.get(
         "https://itunes.apple.com/search",
         params={
@@ -206,13 +223,14 @@ def fetch_itunes_tracks_by_term(term: str, limit: int = 25, country: str = "IT")
 
 
 def is_track_url(source: str) -> bool:
-    """True se il link punta a un singolo brano (non a una playlist)."""
+    """True if the link points to a single track (not a playlist)."""
     return "track/" in source.lower()
 
 
 def extract_deezer_playlist_id(source: str) -> str:
-    """Estrae l'ID numerico da un link tipo
-    https://www.deezer.com/it/playlist/1282495565 (o varianti con altre lingue/query string)."""
+    """Extracts the numeric ID from a link like
+    https://www.deezer.com/en/playlist/1282495565 (or variants with other
+    languages/query strings)."""
     match = re.search(r"playlist/(\d+)", source)
     if match:
         return match.group(1)
@@ -220,8 +238,8 @@ def extract_deezer_playlist_id(source: str) -> str:
 
 
 def extract_deezer_track_id(source: str) -> str:
-    """Estrae l'ID numerico da un link tipo
-    https://www.deezer.com/it/track/123456789."""
+    """Extracts the numeric ID from a link like
+    https://www.deezer.com/en/track/123456789."""
     match = re.search(r"track/(\d+)", source)
     if match:
         return match.group(1)
@@ -229,27 +247,27 @@ def extract_deezer_track_id(source: str) -> str:
 
 
 def fetch_deezer_single_track(track_url_or_id: str) -> dict:
-    """Legge un singolo brano Deezer tramite l'API pubblica (nessuna auth richiesta)."""
+    """Reads a single Deezer track via the public API (no auth required)."""
     track_id = extract_deezer_track_id(track_url_or_id)
     resp = requests.get(f"https://api.deezer.com/track/{track_id}", timeout=10)
     resp.raise_for_status()
     payload = resp.json()
 
     if "error" in payload:
-        raise RuntimeError(payload["error"].get("message", "Errore API Deezer"))
+        raise RuntimeError(payload["error"].get("message", "Deezer API error"))
 
     name = payload.get("title")
     artist_name = (payload.get("artist") or {}).get("name")
     preview_url = payload.get("preview")
     if not name or not artist_name:
-        raise RuntimeError("Brano Deezer non valido o non trovato.")
+        raise RuntimeError("Invalid or not-found Deezer track.")
     return {"name": name, "artists": [artist_name], "preview_url": preview_url}
 
 
 def fetch_deezer_playlist_tracks(playlist_url_or_id: str, limit: int = 300) -> list[dict]:
-    """Legge una playlist Deezer pubblica tramite l'API pubblica (nessuna auth
-    richiesta). Il preview mp3 è già incluso direttamente nella risposta,
-    quindi non serve nessuna ricerca di fallback."""
+    """Reads a public Deezer playlist via the public API (no auth required).
+    The mp3 preview is already included directly in the response, so no
+    fallback lookup is needed."""
     playlist_id = extract_deezer_playlist_id(playlist_url_or_id)
     tracks: list[dict] = []
     url = f"https://api.deezer.com/playlist/{playlist_id}/tracks"
@@ -260,7 +278,7 @@ def fetch_deezer_playlist_tracks(playlist_url_or_id: str, limit: int = 300) -> l
         payload = resp.json()
 
         if "error" in payload:
-            raise RuntimeError(payload["error"].get("message", "Errore API Deezer"))
+            raise RuntimeError(payload["error"].get("message", "Deezer API error"))
 
         for item in payload.get("data", []):
             name = item.get("title")
@@ -279,12 +297,12 @@ def fetch_deezer_playlist_tracks(playlist_url_or_id: str, limit: int = 300) -> l
 
 
 _genre_cache: dict = {"data": None, "fetched_at": 0}
-_GENRE_CACHE_TTL_SECONDS = 3600  # 1 ora, i generi cambiano raramente
+_GENRE_CACHE_TTL_SECONDS = 3600  # 1 hour, genres rarely change
 
 
 def fetch_deezer_genres() -> list[dict]:
-    """Ritorna la lista reale delle categorie musicali disponibili su Deezer:
-    [{'id': 132, 'name': 'Pop'}, ...]. Risultato in cache per un'ora."""
+    """Returns the real list of music categories available on Deezer:
+    [{'id': 132, 'name': 'Pop'}, ...]. Result cached for one hour."""
     now = time.time()
     if _genre_cache["data"] is not None and (now - _genre_cache["fetched_at"]) < _GENRE_CACHE_TTL_SECONDS:
         return _genre_cache["data"]
@@ -304,9 +322,9 @@ def fetch_deezer_genres() -> list[dict]:
 
 
 def fetch_deezer_chart_tracks(limit: int = 50, genre_id: int = 0) -> list[dict]:
-    """Pesca canzoni dalla classifica Deezer (chart), utile per la modalità
-    'casuale': nessuna autenticazione richiesta, sempre disponibile.
-    genre_id=0 (default) = classifica globale, senza filtro di categoria."""
+    """Fetches songs from the Deezer chart, used for "random" mode: no
+    authentication required, always available. genre_id=0 (default) = global
+    chart, no category filter."""
     tracks: list[dict] = []
     url = f"https://api.deezer.com/chart/{genre_id}/tracks"
 
@@ -333,10 +351,10 @@ def fetch_deezer_chart_tracks(limit: int = 50, genre_id: int = 0) -> list[dict]:
 
 
 def fetch_random_tracks_by_category(genre_name: str, genre_id: int, limit: int = 50) -> list[dict]:
-    """Combina la classifica Deezer filtrata per genere (fonte primaria e
-    affidabile) con una ricerca iTunes per lo stesso nome di categoria
-    (fonte secondaria, di supporto, per aggiungere varietà). Deduplica per
-    titolo+artista e mescola il risultato finale."""
+    """Combines the Deezer chart filtered by genre (primary, reliable
+    source) with an iTunes search for the same category name (secondary,
+    supporting source, for extra variety). Deduplicates by title+artist and
+    shuffles the final result."""
     deezer_share = max(int(limit * 0.7), 1)
     itunes_share = max(limit - deezer_share, 1)
 
@@ -367,40 +385,131 @@ def fetch_random_tracks_by_category(genre_name: str, genre_id: int, limit: int =
     return combined
 
 
+def fetch_deezer_playlist_by_search(query: str, limit_tracks: int = 50) -> list[dict]:
+    """Searches for a relevant public Deezer playlist for the given term and
+    reads its tracks. Used for "special" categories (decades, trending,
+    J-Pop/J-Rock/K-Pop, anime) that don't map to a direct Deezer genre."""
+    resp = requests.get(
+        "https://api.deezer.com/search/playlist",
+        params={"q": query, "limit": 5},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    results = payload.get("data", [])
+    if not results:
+        raise RuntimeError(f"No playlist found for '{query}'.")
+
+    best = results[0]
+    playlist_id = str(best.get("id"))
+    return fetch_deezer_playlist_tracks(playlist_id, limit=limit_tracks)
+
+
+def fetch_special_category_tracks(key: str, limit: int = 50) -> list[dict]:
+    """Resolves a special category (e.g. 'decade_80s', 'kpop', 'anime') into
+    its corresponding track list, by searching for a relevant Deezer playlist."""
+    info = SPECIAL_CATEGORIES.get(key)
+    if not info:
+        raise RuntimeError("Unrecognized special category.")
+    return fetch_deezer_playlist_by_search(info["query"], limit_tracks=limit)
+
+
+def search_deezer_artists(query: str, limit: int = 15) -> list[dict]:
+    """Searches artists on Deezer. Returns [{'id': ..., 'name': ...}, ...]."""
+    resp = requests.get(
+        "https://api.deezer.com/search/artist",
+        params={"q": query, "limit": limit},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    return [
+        {"id": a["id"], "name": a["name"]}
+        for a in payload.get("data", [])
+        if a.get("id") and a.get("name")
+    ]
+
+
+def resolve_artist_fuzzy(query: str) -> dict | None:
+    """Finds the closest Deezer artist to the typed text, tolerating typos
+    and punctuation (e.g. 'Evanescene' -> 'Evanescence'), using Deezer
+    search for the candidate pool and rapidfuzz to pick the best match even
+    when the text doesn't match exactly."""
+    candidates = search_deezer_artists(query, limit=15)
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda c: fuzz.token_sort_ratio(query.lower(), c["name"].lower()))
+    return best
+
+
+def fetch_deezer_artist_top_tracks(artist_id: int, limit: int = 50) -> list[dict]:
+    """Reads an artist's most popular tracks on Deezer."""
+    resp = requests.get(
+        f"https://api.deezer.com/artist/{artist_id}/top",
+        params={"limit": limit},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+
+    tracks = []
+    for item in payload.get("data", []):
+        name = item.get("title")
+        artist_name = (item.get("artist") or {}).get("name")
+        preview_url = item.get("preview")
+        if name and artist_name:
+            tracks.append({"name": name, "artists": [artist_name], "preview_url": preview_url})
+    return tracks
+
+
+def fetch_tracks_by_artist_name(query: str, limit: int = 50) -> list[dict]:
+    """Resolves the typed artist name (even with typos) and returns their
+    most popular tracks."""
+    artist = resolve_artist_fuzzy(query)
+    if not artist:
+        raise RuntimeError(f"No artist found for '{query}'.")
+    tracks = fetch_deezer_artist_top_tracks(artist["id"], limit=limit)
+    if not tracks:
+        raise RuntimeError(f"No tracks found for artist '{artist['name']}'.")
+    return tracks
+
+
 def _fetch_single_link(source: str, spotify_provider: "SpotifyProvider | None") -> list[dict]:
-    """Risolve un singolo link (playlist o brano) nella lista di tracce corrispondente."""
+    """Resolves a single link (playlist or track) into its corresponding track list."""
     if is_deezer_source(source):
         if is_track_url(source):
             return [fetch_deezer_single_track(source)]
         return fetch_deezer_playlist_tracks(source)
 
     if is_itunes_source(source):
-        # iTunes/Apple Music: al momento supportiamo solo il brano singolo
-        # (non esiste un modo affidabile per leggere playlist utente da iTunes
-        # tramite API pubblica non autenticata).
+        # iTunes/Apple Music: currently we only support single tracks
+        # (there's no reliable way to read a user playlist from iTunes via
+        # a public, unauthenticated API).
         return [fetch_itunes_single_track(source)]
 
     if is_spotify_source(source) or spotify_provider is not None:
         if spotify_provider is None:
             raise RuntimeError(
-                "Link Spotify richiesto ma le credenziali Spotify non sono configurate."
+                "Spotify link requested but Spotify credentials are not configured."
             )
         if is_track_url(source):
             return [spotify_provider.fetch_single_track(source)]
         return spotify_provider.fetch_tracks(source)
 
     raise RuntimeError(
-        "Non riconosco questo link: incolla un link Spotify, Deezer o iTunes/Apple Music valido."
+        "I don't recognize this link: paste a valid Spotify, Deezer, or iTunes/Apple Music link."
     )
 
 
 def fetch_tracks_from_source(source: str, spotify_provider: "SpotifyProvider | None" = None) -> list[dict]:
-    """Dispatcher: riconosce se il link è Deezer o Spotify, playlist o brano singolo,
-    e supporta più link separati da virgola (utile per costruire un mini-quiz
-    con brani scelti a mano senza creare una playlist apposita)."""
+    """Dispatcher: recognizes whether the link is Deezer or Spotify, a
+    playlist or a single track, and supports multiple links separated by
+    commas (useful for building a custom mini-quiz without creating a
+    dedicated playlist)."""
     links = [part.strip() for part in source.split(",") if part.strip()]
     if not links:
-        raise RuntimeError("Nessun link valido fornito.")
+        raise RuntimeError("No valid link provided.")
 
     all_tracks: list[dict] = []
     errors: list[str] = []
@@ -411,16 +520,16 @@ def fetch_tracks_from_source(source: str, spotify_provider: "SpotifyProvider | N
             errors.append(f"{link}: {e}")
 
     if not all_tracks:
-        raise RuntimeError("; ".join(errors) if errors else "Nessun brano trovato.")
+        raise RuntimeError("; ".join(errors) if errors else "No tracks found.")
 
     return all_tracks
 
 
 def deezer_preview_for(title: str, artist: str) -> str | None:
-    """Cerca il brano su Deezer e ritorna l'URL del preview mp3 (30s), o None."""
+    """Searches Deezer for the track and returns the 30s mp3 preview URL, or None."""
     session_timeout = 8
 
-    # Tentativo 1: query strutturata
+    # Attempt 1: structured query
     try:
         resp = requests.get(
             "https://api.deezer.com/search",
@@ -436,7 +545,7 @@ def deezer_preview_for(title: str, artist: str) -> str | None:
     except requests.RequestException:
         pass
 
-    # Tentativo 2: query libera, più permissiva
+    # Attempt 2: looser, free-text query
     try:
         resp = requests.get(
             "https://api.deezer.com/search",
@@ -456,8 +565,8 @@ def deezer_preview_for(title: str, artist: str) -> str | None:
 
 
 def resolve_playable_url(track: dict) -> str | None:
-    """Ritorna un URL mp3 riproducibile per il brano, usando Spotify se disponibile
-    e Deezer come fallback."""
+    """Returns a playable mp3 URL for the track, using Spotify if available
+    and Deezer as a fallback."""
     if track.get("preview_url"):
         return track["preview_url"]
     return deezer_preview_for(track["name"], track["artists"][0])

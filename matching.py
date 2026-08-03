@@ -1,12 +1,12 @@
 """
-Normalizzazione e matching "permissivo" per il quiz musicale.
+Normalization and "lenient" matching for the music quiz.
 
-Gestisce automaticamente:
-- maiuscole/minuscole e accenti
-- contenuto tra parentesi/quadre (es. "(feat. Tizio)", "[Radio Edit]")
-- parole di rumore: feat, ft, featuring, remix, remaster, version, live, radio edit, explicit
-- punteggiatura varia
-- piccoli refusi (fuzzy matching con soglia configurabile)
+Automatically handles:
+- upper/lowercase and accents
+- content in parentheses/brackets (e.g. "(feat. Someone)", "[Radio Edit]")
+- noise words: feat, ft, featuring, remix, remaster, version, live, radio edit, explicit
+- assorted punctuation
+- small typos (fuzzy matching with configurable threshold)
 """
 
 import re
@@ -14,7 +14,7 @@ import unicodedata
 
 from rapidfuzz import fuzz
 
-# Pattern da rimuovere prima del confronto (case-insensitive, applicati in ordine)
+# Patterns to strip before comparison (case-insensitive, applied in order)
 _NOISE_PATTERNS = [
     r"\(.*?\)",
     r"\[.*?\]",
@@ -51,14 +51,14 @@ def normalize(text: str) -> str:
 
 
 def is_close_match(guess: str, target: str, threshold: int = 82) -> bool:
-    """True se 'guess' è abbastanza vicino a 'target' da considerarsi corretto."""
+    """True if 'guess' is close enough to 'target' to be considered correct."""
     g = normalize(guess)
     t = normalize(target)
     if not g or not t:
         return False
     if g == t:
         return True
-    # Match per contenimento (utile se uno scrive solo parte del titolo/artista)
+    # Containment match (useful if someone only types part of the title/artist)
     if len(g) >= 3 and (g in t or t in g):
         return True
     score = fuzz.token_sort_ratio(g, t)
@@ -66,5 +66,5 @@ def is_close_match(guess: str, target: str, threshold: int = 82) -> bool:
 
 
 def any_artist_match(guess: str, artists: list[str], threshold: int = 82) -> bool:
-    """True se 'guess' matcha uno qualsiasi degli artisti (principale o featuring)."""
+    """True if 'guess' matches any of the artists (main or featured)."""
     return any(is_close_match(guess, artist, threshold) for artist in artists)

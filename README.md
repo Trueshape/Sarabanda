@@ -1,8 +1,8 @@
 # 🎵 Discord Bot — Music Quiz
 
-A bot that joins a voice channel, plays songs from a Spotify playlist (with
-automatic Deezer fallback for audio) or from Deezer/iTunes, and awards points
-to whoever guesses the title and artist in chat.
+A bot that joins a voice channel, plays songs sourced entirely from Deezer's
+public API (random chart, a music genre/special category, or a specific
+artist), and awards points to whoever guesses the title and artist in chat.
 
 **Scoring:** first to guess the **title** → 2 points · first to guess the
 **artist** → 1 point (open answer mode), or **3 points** for the first
@@ -32,14 +32,7 @@ upper/lowercase, accents, "(feat. ...)", "[Remix]", small typos, etc.
    - Permissions: `Send Messages`, `Connect`, `Speak`, `Read Message History`
    - Open the generated URL and invite the bot to your server
 
-## 3. Create Spotify credentials
-
-1. Go to https://developer.spotify.com/dashboard → **Create app**
-2. You only need the **Client ID** and **Client Secret** (you don't need to
-   configure a real redirect URI for the bot to work, but the field must
-   still be filled in with some value, e.g. `http://127.0.0.1:8888/callback`)
-
-## 4. Installation
+## 3. Installation
 
 ```bash
 cd discord-quiz-bot
@@ -49,15 +42,14 @@ cp .env.example .env
 
 Open `.env` and fill in:
 - `DISCORD_TOKEN` (from step 2)
-- `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` (from step 3)
 
-## 5. Run it
+## 4. Run it
 
 ```bash
 python bot.py
 ```
 
-## 6. Using it in Discord
+## 5. Using it in Discord
 
 You need to already be connected to a voice channel before running
 `/quiz start`: the bot joins you there automatically.
@@ -78,20 +70,17 @@ Typing `/quiz start` shows a menu with all the parameters right away:
 - **songs** (required): how many songs to play, e.g. `10`
 - **mode** (required): pick from the dropdown between "Open answer" or
   "Multiple choice (4 buttons)"
-- **source** (optional): paste a **playlist or single-song** link (Spotify,
-  Deezer, or iTunes/Apple Music). You can also paste **multiple links
-  separated by commas**, even mixing all three sources, to build a custom
-  mini-quiz without creating a dedicated playlist (e.g.
-  `spotify_link, deezer_link, itunes_link`). Leave empty for random songs
-  from the Deezer chart
-- **category** (optional, ignored if you use `source` or `artist`): filters
-  random songs by music genre (Pop, Rock, Rap/Hip Hop, etc.) or by special
-  category: **decades** (70s/80s/90s/2000s/2010s/2020s), **Recent Hits**,
-  **Trending Now**, **J-Pop**, **J-Rock**, **K-Pop**, **Anime**. As you type,
+- **category** (optional, ignored if you use `artist`): filters
+  random songs by music genre (Classical, Pop, Rap/Hip Hop, Dance, Rock,
+  Alternative, Metal, Electro, Jazz) or by special
+  category: **decades** (80s/90s/2000s/2010s/2020s), **Recent Hits**,
+  **Trending Now**, **J-Pop**, **J-Rock**, **K-Pop**, **Anime**, **Film**,
+  **Games**. As you type,
   Discord suggests the available options (autocomplete). Leave empty to use
   the global chart
-- **artist** (optional, ignored if you use `source`): type a specific
-  artist's name for a quiz built from their most popular songs. Tolerates
+- **artist** (optional): type a specific
+  artist's name for a quiz built entirely from their own songs (top tracks
+  plus deep cuts from their studio albums). Tolerates
   typos and imprecise punctuation (e.g. typing "Evanescene" still finds
   "Evanescence") thanks to fuzzy matching
 - **duration** (optional): seconds per round, default 30
@@ -145,42 +134,41 @@ the first time, every day defaults to "not working".
 
 ## Technical notes and limitations
 
-- **⚠️ Spotify now requires a Premium account for the app**: Spotify
-  introduced a requirement where the account that owns the developer app
-  must have an active Premium subscription, otherwise API requests fail
-  with a 403 error ("Active premium subscription required"). If you don't
-  have Premium, **use Deezer links or `random` mode** (based on the Deezer
-  chart), which always work with no account or authentication needed.
-- **Automatic Spotify/Deezer/iTunes recognition**: when you paste a link,
-  the bot recognizes the service on its own based on the domain in the URL,
-  and uses the matching API. For Deezer and iTunes the audio preview is
-  already included in the response; for Spotify, if `preview_url` is
-  missing, the bot automatically looks up the same song on Deezer as a
-  fallback.
-- **iTunes/Apple Music**: only supported for **single tracks** (a direct
-  link to a song), not playlists — there's no unauthenticated public API to
-  read a user's Apple Music playlist.
-- **Deezer-only automatic sourcing**: `random` mode, categories, special
-  categories, and artist quizzes are all built exclusively from Deezer's
-  public API — no Spotify/iTunes calls in these paths, since Deezer is the
-  only source that's reliably reachable with no authentication. Spotify and
-  iTunes are still recognized if you paste an explicit link, but aren't
-  relied on automatically.
-- **Music categories**: the genre list in the `category` autocomplete is
-  read live from the Deezer API (`/genre`) and cached for one hour. When you
-  pick a category, the bot combines the Deezer chart filtered by that genre
-  with a public Deezer playlist found by searching for the genre name (and
-  a second search pass with " hits" appended if more variety is still
-  needed), so it isn't just the same chart every time.
+- **Deezer-only**: every song source — `random` mode, categories, special
+  categories, and artist quizzes — is built exclusively from Deezer's
+  public API, which needs no account, no API key, and no authentication of
+  any kind, so it always works out of the box.
+- **Music categories**: the plain-genre slots in the `category` autocomplete
+  are curated, not the full raw Deezer genre list — only **Classical, Pop,
+  Rap/Hip Hop, Dance, Rock, Alternative, Metal, Electro, Jazz** (see
+  `GENRE_ALLOWLIST` in `music_source.py`) show up, matched against Deezer's
+  live `/genre` names (cached for one hour) so the real IDs are always
+  correct even if Deezer changes them. When you pick one, the bot combines
+  the Deezer chart filtered by that genre with a public Deezer playlist
+  found by searching for the genre name (and a second search pass with
+  " hits" appended if more variety is still needed), so it isn't just the
+  same chart every time.
 - **"Random" mode variety**: instead of always returning the global Deezer
   chart, `random` mode also mixes in the charts of a few randomly-picked
   Deezer genres each time you start a quiz, for more variety across runs.
 - **Special categories** (decades, Recent Hits, Trending Now, J-Pop, J-Rock,
-  K-Pop, Anime): these don't map to a direct Deezer genre, so the bot
+  K-Pop, Anime, Film, Games): these don't map to a direct Deezer genre (Film
+  and Games in particular come merged as a single genre in Deezer's own
+  genre list, so they're split here into two real categories), so the bot
   dynamically searches for a relevant public Deezer playlist at request
   time (no fragile hardcoded IDs). If the search finds nothing suitable for
   a very niche category, the bot reports an error instead of returning
-  irrelevant random results.
+  irrelevant random results. Special categories are always listed first in
+  the `category` autocomplete, ahead of the plain Deezer genres, so they
+  don't get crowded out by Discord's 25-choice limit (see next point).
+- **Discord's 25-choice autocomplete limit**: Discord caps every
+  autocomplete field at 25 suggestions — anything past that simply isn't
+  sent, no error is raised. With 13 special categories plus the 9 curated
+  genres, the `category` field currently shows 22 choices total, comfortably
+  under the cap, so nothing gets cut off. If you ever add enough categories
+  to go past 25, special categories go first (see above) since they're the
+  curated ones, and any genres beyond the remaining slots would be silently
+  dropped. Both groups are sorted alphabetically.
 - **Artist search, strictly one-artist**: uses Deezer's artist search
   combined with `rapidfuzz` to tolerate typos, then builds a pool from that
   artist's top tracks plus deep cuts from their studio albums (compilation
@@ -223,8 +211,7 @@ git push -u origin main
 ⚠️ The included `.gitignore` already excludes `.env` (your credentials) and
 local scores in `data/*.json` — **make sure you never committed `.env`**
 before pushing. If you did by mistake, immediately regenerate the Discord
-token and Spotify credentials (once published on GitHub they should be
-considered compromised).
+token (once published on GitHub it should be considered compromised).
 
 ## 8. Deploy to Render (free plan) + "keep-alive" cron job
 
@@ -241,8 +228,6 @@ HTTP requests.
 4. Plan: **Free**
 5. Under **Environment Variables**, add:
    - `DISCORD_TOKEN`
-   - `SPOTIFY_CLIENT_ID`
-   - `SPOTIFY_CLIENT_SECRET`
    - `ROUND_DURATION_SECONDS` (optional, default 30)
 6. **Create Web Service** — on the first deploy Render will build the Docker
    image and start `python bot.py`

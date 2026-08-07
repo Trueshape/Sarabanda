@@ -6,9 +6,5 @@ services:
     envVars:
       - key: DISCORD_TOKEN
         sync: false
-      - key: SPOTIFY_CLIENT_ID
-        sync: false
-      - key: SPOTIFY_CLIENT_SECRET
-        sync: false
       - key: ROUND_DURATION_SECONDS
         value: "30"

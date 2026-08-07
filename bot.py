@@ -3,8 +3,8 @@ Discord music quiz bot — slash commands.
 
 Commands:
   /quiz start   -> start the quiz. ALL parameters are set directly in the
-                   slash command menu: songs, source (playlist/track links
-                   or random), category, artist, mode, round duration
+                   slash command menu: songs, category, artist, mode,
+                   round duration
   /quiz stop    -> stop the quiz and disconnect the bot
   /quiz leaderboard -> show the server's overall leaderboard
   /quiz reset   -> reset the server's leaderboard
@@ -40,13 +40,11 @@ from keep_alive import keep_alive
 from matching import any_artist_match, is_close_match
 from music_source import (
     SPECIAL_CATEGORIES,
-    SpotifyProvider,
     fetch_deezer_genres,
     fetch_deezer_varied_random_tracks,
     fetch_random_tracks_by_category,
     fetch_special_category_tracks,
     fetch_tracks_by_artist_name,
-    fetch_tracks_from_source,
     resolve_playable_url,
     search_deezer_artists,
 )
@@ -63,12 +61,6 @@ intents.message_content = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-
-spotify_provider: SpotifyProvider | None = None
-try:
-    spotify_provider = SpotifyProvider()
-except RuntimeError as e:
-    print(f"[WARNING] {e}")
 
 
 class GuildGameState:
@@ -272,7 +264,7 @@ def help_embed() -> discord.Embed:
         title="🎵 Music Quiz — Commands",
         color=discord.Color.blurple(),
         description=(
-            "`/quiz start` — start the quiz: pick songs, source, category, "
+            "`/quiz start` — start the quiz: pick songs, category, "
             "artist, mode and round duration right in the slash command menu\n"
             "`/quiz stop` — stop the quiz\n"
             "`/quiz leaderboard` — show the leaderboard\n"
@@ -303,16 +295,30 @@ async def category_autocomplete(
     except Exception:
         genres = []
 
-    choices = [
-        app_commands.Choice(name=g["name"], value=f"genre:{g['id']}")
-        for g in genres
-        if current_lower in g["name"].lower()
-    ]
+    # Special categories first: Discord's autocomplete hard-caps at 25
+    # choices per field (anything beyond that is simply not sent, no error),
+    # and the curated ones (decades, Anime, Film, Games, K-Pop...) are the
+    # whole point of this list, so they must never get crowded out by the
+    # plain Deezer genre list when the user hasn't typed anything specific
+    # yet. Each group is alphabetically sorted for easier scanning.
+    special_matches = sorted(
+        (info["label"] for info in SPECIAL_CATEGORIES.values() if current_lower in info["label"].lower()),
+        key=str.lower,
+    )
+    genre_matches = sorted(
+        (g["name"] for g in genres if current_lower in g["name"].lower()),
+        key=str.lower,
+    )
+    special_key_by_label = {info["label"]: key for key, info in SPECIAL_CATEGORIES.items()}
+    genre_id_by_name = {g["name"]: g["id"] for g in genres}
 
+    choices = [
+        app_commands.Choice(name=label, value=f"special:{special_key_by_label[label]}")
+        for label in special_matches
+    ]
     choices += [
-        app_commands.Choice(name=info["label"], value=f"special:{key}")
-        for key, info in SPECIAL_CATEGORIES.items()
-        if current_lower in info["label"].lower()
+        app_commands.Choice(name=name, value=f"genre:{genre_id_by_name[name]}")
+        for name in genre_matches
     ]
 
     return choices[:25]
@@ -327,6 +333,7 @@ async def artist_autocomplete(
         candidates = await asyncio.to_thread(search_deezer_artists, current.strip(), 15)
     except Exception:
         candidates = []
+    candidates = sorted(candidates, key=lambda c: c["name"].lower())
     return [app_commands.Choice(name=c["name"], value=c["name"]) for c in candidates[:25]]
 
 
@@ -334,9 +341,8 @@ async def artist_autocomplete(
 @app_commands.describe(
     songs="How many songs to play (e.g. 10)",
     mode="How answers work: type freely, or pick from 4 buttons",
-    source="Spotify/Deezer/iTunes link (playlist, single track, or multiple links separated by commas). Empty = random",
-    category="Genre or special category (decades, J-Pop, K-Pop, anime, etc). Ignored if you use 'source' or 'artist'",
-    artist="A specific artist's name (typo-tolerant). Ignored if you use 'source'",
+    category="Genre or special category (decades, J-Pop, K-Pop, anime, etc). Ignored if you use 'artist'",
+    artist="A specific artist's name (typo-tolerant)",
     duration="Duration of each round in seconds (default 30)",
 )
 @app_commands.choices(
@@ -350,7 +356,6 @@ async def quiz_start(
     interaction: discord.Interaction,
     songs: app_commands.Range[int, 1, 100],
     mode: app_commands.Choice[str],
-    source: str = None,
     category: str = None,
     artist: str = None,
     duration: app_commands.Range[int, 5, 120] = ROUND_DURATION,
@@ -372,16 +377,7 @@ async def quiz_start(
     channel = interaction.channel
 
     try:
-        if source and source.strip().lower() != "random":
-            if category or artist:
-                await channel.send(
-                    "ℹ️ The `category`/`artist` parameters are ignored when you specify a `source` (playlist/tracks)."
-                )
-            tracks = await asyncio.wait_for(
-                asyncio.to_thread(fetch_tracks_from_source, source.strip(), spotify_provider),
-                timeout=45,
-            )
-        elif artist:
+        if artist:
             tracks = await asyncio.wait_for(
                 asyncio.to_thread(fetch_tracks_by_artist_name, artist.strip(), limit=max(songs * 3, 30)),
                 timeout=45,
@@ -422,7 +418,7 @@ async def quiz_start(
         return
 
     if not tracks:
-        await channel.send("❌ No songs found for this category/artist/source, aborting startup.")
+        await channel.send("❌ No songs found for this category/artist, aborting startup.")
         return
 
     rounds = songs
@@ -437,7 +433,7 @@ async def quiz_start(
     # Only ever set for a real artist-locked quiz: use the artist name as it
     # actually came back on the fetched tracks (post fuzzy-resolution), so
     # the decoy filter below matches exactly.
-    state.locked_artist = tracks[0]["artists"][0] if (artist and not source) else None
+    state.locked_artist = tracks[0]["artists"][0] if artist else None
 
     voice_channel = member.voice.channel
     try:
@@ -618,7 +614,7 @@ def build_multiple_choice_options(track: dict, all_tracks: list[dict], locked_ar
 
 
 async def pick_next_track(state: GuildGameState):
-    """Picks a track not used yet with playable audio (Spotify or Deezer fallback)."""
+    """Picks a track not used yet with playable audio (Deezer preview, with a Deezer search fallback if missing)."""
     remaining = [i for i in range(len(state.tracks)) if i not in state.used_indexes]
     random.shuffle(remaining)
 

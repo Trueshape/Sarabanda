@@ -41,8 +41,8 @@ from matching import any_artist_match, is_close_match
 from music_source import (
     SPECIAL_CATEGORIES,
     SpotifyProvider,
-    fetch_deezer_chart_tracks,
     fetch_deezer_genres,
+    fetch_deezer_varied_random_tracks,
     fetch_random_tracks_by_category,
     fetch_special_category_tracks,
     fetch_tracks_by_artist_name,
@@ -77,6 +77,10 @@ class GuildGameState:
     def __init__(self):
         self.tracks: list[dict] = []
         self.used_indexes: set[int] = set()
+        # Set when the quiz was started with the "artist" filter, so that
+        # multiple-choice decoys can be double-checked against it (belt and
+        # braces on top of the tracks already being artist-only).
+        self.locked_artist: str | None = None
         self.voice_client: discord.VoiceClient | None = None
         self.text_channel: discord.abc.Messageable | None = None
         self.active: bool = False
@@ -407,7 +411,7 @@ async def quiz_start(
                 )
         else:
             tracks = await asyncio.wait_for(
-                asyncio.to_thread(fetch_deezer_chart_tracks, limit=max(songs * 3, 30)),
+                asyncio.to_thread(fetch_deezer_varied_random_tracks, limit=max(songs * 3, 30)),
                 timeout=45,
             )
     except asyncio.TimeoutError:
@@ -430,6 +434,10 @@ async def quiz_start(
 
     state.tracks = tracks
     state.used_indexes = set()
+    # Only ever set for a real artist-locked quiz: use the artist name as it
+    # actually came back on the fetched tracks (post fuzzy-resolution), so
+    # the decoy filter below matches exactly.
+    state.locked_artist = tracks[0]["artists"][0] if (artist and not source) else None
 
     voice_channel = member.voice.channel
     try:
@@ -508,7 +516,9 @@ async def run_quiz(
             artists_display = ", ".join(track["artists"])
 
             if game_mode == "multiple_choice":
-                options, correct_number = build_multiple_choice_options(track, state.tracks)
+                options, correct_number = build_multiple_choice_options(
+                    track, state.tracks, locked_artist=state.locked_artist
+                )
                 round_state.options = options
                 round_state.correct_number = correct_number
 
@@ -583,10 +593,20 @@ async def run_quiz(
             await channel.send("🏁 Quiz finished! Thanks for playing 🎶")
 
 
-def build_multiple_choice_options(track: dict, all_tracks: list[dict]):
+def build_multiple_choice_options(track: dict, all_tracks: list[dict], locked_artist: str | None = None):
     """Builds up to 4 options (1 correct + up to 3 'decoys' taken from the
-    other tracks in this session), shuffled. Returns (options, correct_number)."""
+    other tracks in this session), shuffled. Returns (options, correct_number).
+
+    When `locked_artist` is set (artist-only quiz), decoys are additionally
+    filtered to that exact artist as a safety net, so a multiple-choice
+    question never shows another artist's song as a wrong answer even if
+    something unexpected ended up in the track pool."""
     decoy_pool = [t for t in all_tracks if t is not track]
+    if locked_artist:
+        target = locked_artist.strip().lower()
+        artist_only_pool = [t for t in decoy_pool if t["artists"][0].strip().lower() == target]
+        if artist_only_pool:
+            decoy_pool = artist_only_pool
     random.shuffle(decoy_pool)
     decoys = decoy_pool[:3]
 

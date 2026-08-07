@@ -350,39 +350,83 @@ def fetch_deezer_chart_tracks(limit: int = 50, genre_id: int = 0) -> list[dict]:
     return tracks
 
 
+def fetch_deezer_varied_random_tracks(limit: int = 50, extra_charts: int = 3) -> list[dict]:
+    """"Random" mode, Deezer-only, with more variety: combines the global
+    chart with a few charts from randomly-picked genres, instead of always
+    returning the same global top list. Everything comes from Deezer's
+    public API (no auth needed, always available)."""
+    combined: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(items: list[dict]):
+        for t in items:
+            key = (t["name"].lower(), t["artists"][0].lower())
+            if key not in seen:
+                seen.add(key)
+                combined.append(t)
+
+    try:
+        _add(fetch_deezer_chart_tracks(limit=limit, genre_id=0))
+    except Exception:
+        pass
+
+    try:
+        genres = [g for g in fetch_deezer_genres() if g["id"] != 0]
+    except Exception:
+        genres = []
+
+    if genres:
+        chosen_genres = random.sample(genres, k=min(extra_charts, len(genres)))
+        for genre in chosen_genres:
+            try:
+                _add(fetch_deezer_chart_tracks(limit=max(limit // 2, 10), genre_id=genre["id"]))
+            except Exception:
+                continue
+
+    random.shuffle(combined)
+    return combined[:limit] if limit else combined
+
+
 def fetch_random_tracks_by_category(genre_name: str, genre_id: int, limit: int = 50) -> list[dict]:
-    """Combines the Deezer chart filtered by genre (primary, reliable
-    source) with an iTunes search for the same category name (secondary,
-    supporting source, for extra variety). Deduplicates by title+artist and
-    shuffles the final result."""
-    deezer_share = max(int(limit * 0.7), 1)
-    itunes_share = max(limit - deezer_share, 1)
+    """Builds a varied track pool for a chosen category, using two
+    independent Deezer sources so results aren't just "the genre chart every
+    time": the Deezer chart filtered by genre, plus a public Deezer playlist
+    found by searching for the genre name. Deduplicates by title+artist and
+    shuffles the final result. Deezer-only (no Spotify/iTunes dependency),
+    since it's the one source that's always reliably reachable."""
+    chart_share = max(int(limit * 0.6), 1)
+    playlist_share = max(limit - chart_share, 1)
 
     combined: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    try:
-        deezer_tracks = fetch_deezer_chart_tracks(limit=deezer_share, genre_id=genre_id)
-    except Exception:
-        deezer_tracks = []
-    for t in deezer_tracks:
-        key = (t["name"].lower(), t["artists"][0].lower())
-        if key not in seen:
-            seen.add(key)
-            combined.append(t)
+    def _add(items: list[dict]):
+        for t in items:
+            key = (t["name"].lower(), t["artists"][0].lower())
+            if key not in seen:
+                seen.add(key)
+                combined.append(t)
 
     try:
-        itunes_tracks = fetch_itunes_tracks_by_term(genre_name, limit=itunes_share)
+        _add(fetch_deezer_chart_tracks(limit=chart_share, genre_id=genre_id))
     except Exception:
-        itunes_tracks = []
-    for t in itunes_tracks:
-        key = (t["name"].lower(), t["artists"][0].lower())
-        if key not in seen:
-            seen.add(key)
-            combined.append(t)
+        pass
+
+    try:
+        _add(fetch_deezer_playlist_by_search(genre_name, limit_tracks=playlist_share))
+    except Exception:
+        pass
+
+    # Small extra variety pass with a slightly different search phrasing, in
+    # case the plain genre name mostly surfaced the same playlist as above.
+    if len(combined) < limit:
+        try:
+            _add(fetch_deezer_playlist_by_search(f"{genre_name} hits", limit_tracks=limit - len(combined)))
+        except Exception:
+            pass
 
     random.shuffle(combined)
-    return combined
+    return combined[:limit] if limit else combined
 
 
 def fetch_deezer_playlist_by_search(query: str, limit_tracks: int = 50) -> list[dict]:
@@ -443,36 +487,128 @@ def resolve_artist_fuzzy(query: str) -> dict | None:
     return best
 
 
-def fetch_deezer_artist_top_tracks(artist_id: int, limit: int = 50) -> list[dict]:
-    """Reads an artist's most popular tracks on Deezer."""
-    resp = requests.get(
-        f"https://api.deezer.com/artist/{artist_id}/top",
-        params={"limit": limit},
-        timeout=10,
-    )
+def fetch_deezer_artist_top_tracks(artist_id: int, limit: int = 100) -> list[dict]:
+    """Reads an artist's most popular tracks on Deezer, paginating through
+    Deezer's 'next' links so we're not capped at whatever the API's default
+    page size is."""
+    tracks: list[dict] = []
+    url = f"https://api.deezer.com/artist/{artist_id}/top?limit=50"
+
+    while url and len(tracks) < limit:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        for item in payload.get("data", []):
+            name = item.get("title")
+            artist_name = (item.get("artist") or {}).get("name")
+            preview_url = item.get("preview")
+            if name and artist_name:
+                tracks.append({"name": name, "artists": [artist_name], "preview_url": preview_url})
+            if len(tracks) >= limit:
+                break
+
+        url = payload.get("next")
+
+    return tracks
+
+
+def fetch_deezer_artist_albums(artist_id: int, limit: int = 30) -> list[dict]:
+    """Reads an artist's albums on Deezer. Skips compilations ('compile'
+    record type), since those are multi-artist collections and would let
+    other artists' songs sneak into an artist-only quiz."""
+    albums: list[dict] = []
+    url = f"https://api.deezer.com/artist/{artist_id}/albums?limit=50"
+
+    while url and len(albums) < limit:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+
+        for item in payload.get("data", []):
+            if item.get("record_type") == "compile":
+                continue
+            album_id = item.get("id")
+            if album_id:
+                albums.append({"id": album_id})
+            if len(albums) >= limit:
+                break
+
+        url = payload.get("next")
+
+    return albums
+
+
+def fetch_deezer_album_tracks(album_id: int, artist_name: str) -> list[dict]:
+    """Reads an album's tracks on Deezer, keeping only the tracks whose main
+    artist matches `artist_name` (so a feature-heavy or various-artists
+    album doesn't leak other artists' songs into the pool)."""
+    resp = requests.get(f"https://api.deezer.com/album/{album_id}/tracks", timeout=10)
     resp.raise_for_status()
     payload = resp.json()
 
+    target = artist_name.strip().lower()
     tracks = []
     for item in payload.get("data", []):
         name = item.get("title")
-        artist_name = (item.get("artist") or {}).get("name")
+        track_artist = (item.get("artist") or {}).get("name")
         preview_url = item.get("preview")
-        if name and artist_name:
-            tracks.append({"name": name, "artists": [artist_name], "preview_url": preview_url})
+        if not name or not track_artist:
+            continue
+        if track_artist.strip().lower() != target:
+            continue
+        tracks.append({"name": name, "artists": [track_artist], "preview_url": preview_url})
     return tracks
 
 
 def fetch_tracks_by_artist_name(query: str, limit: int = 50) -> list[dict]:
-    """Resolves the typed artist name (even with typos) and returns their
-    most popular tracks."""
+    """Resolves the typed artist name (even with typos) and returns a
+    varied pool of ONLY that artist's songs (top tracks + deep cuts from
+    their studio albums), so that when the user asks for one artist, every
+    song played AND every multiple-choice decoy is guaranteed to be by that
+    same artist."""
     artist = resolve_artist_fuzzy(query)
     if not artist:
         raise RuntimeError(f"No artist found for '{query}'.")
-    tracks = fetch_deezer_artist_top_tracks(artist["id"], limit=limit)
-    if not tracks:
+
+    target = artist["name"].strip().lower()
+    combined: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(items: list[dict]):
+        for t in items:
+            if t["artists"][0].strip().lower() != target:
+                continue
+            key = (t["name"].lower(), t["artists"][0].lower())
+            if key not in seen:
+                seen.add(key)
+                combined.append(t)
+
+    try:
+        _add(fetch_deezer_artist_top_tracks(artist["id"], limit=max(limit, 100)))
+    except Exception:
+        pass
+
+    # Pull in deep cuts from their studio albums too, for real variety
+    # beyond just the "top tracks" chart, but only once we still need more.
+    if len(combined) < limit:
+        try:
+            albums = fetch_deezer_artist_albums(artist["id"], limit=25)
+        except Exception:
+            albums = []
+        for album in albums:
+            if len(combined) >= max(limit * 2, 60):
+                break
+            try:
+                _add(fetch_deezer_album_tracks(album["id"], artist["name"]))
+            except Exception:
+                continue
+
+    if not combined:
         raise RuntimeError(f"No tracks found for artist '{artist['name']}'.")
-    return tracks
+
+    random.shuffle(combined)
+    return combined
 
 
 def _fetch_single_link(source: str, spotify_provider: "SpotifyProvider | None") -> list[dict]:
@@ -526,8 +662,22 @@ def fetch_tracks_from_source(source: str, spotify_provider: "SpotifyProvider | N
 
 
 def deezer_preview_for(title: str, artist: str) -> str | None:
-    """Searches Deezer for the track and returns the 30s mp3 preview URL, or None."""
+    """Searches Deezer for the track and returns the 30s mp3 preview URL, or
+    None. Only accepts a result whose artist actually matches the one we
+    asked for (fuzzy, to tolerate minor naming differences) — otherwise a
+    same-titled cover/song by a different artist could slip in and break an
+    artist-only quiz."""
     session_timeout = 8
+    target = artist.strip().lower()
+
+    def _best_matching_preview(data: list[dict]) -> str | None:
+        for item in data:
+            item_artist = (item.get("artist") or {}).get("name", "")
+            if fuzz.token_sort_ratio(target, item_artist.strip().lower()) >= 85:
+                preview = item.get("preview")
+                if preview:
+                    return preview
+        return None
 
     # Attempt 1: structured query
     try:
@@ -538,10 +688,9 @@ def deezer_preview_for(title: str, artist: str) -> str | None:
         )
         resp.raise_for_status()
         data = resp.json().get("data", [])
-        if data:
-            preview = data[0].get("preview")
-            if preview:
-                return preview
+        preview = _best_matching_preview(data)
+        if preview:
+            return preview
     except requests.RequestException:
         pass
 
@@ -554,10 +703,9 @@ def deezer_preview_for(title: str, artist: str) -> str | None:
         )
         resp.raise_for_status()
         data = resp.json().get("data", [])
-        if data:
-            preview = data[0].get("preview")
-            if preview:
-                return preview
+        preview = _best_matching_preview(data)
+        if preview:
+            return preview
     except requests.RequestException:
         pass
 

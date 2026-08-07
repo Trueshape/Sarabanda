@@ -160,25 +160,35 @@ the first time, every day defaults to "not working".
 - **iTunes/Apple Music**: only supported for **single tracks** (a direct
   link to a song), not playlists — there's no unauthenticated public API to
   read a user's Apple Music playlist.
+- **Deezer-only automatic sourcing**: `random` mode, categories, special
+  categories, and artist quizzes are all built exclusively from Deezer's
+  public API — no Spotify/iTunes calls in these paths, since Deezer is the
+  only source that's reliably reachable with no authentication. Spotify and
+  iTunes are still recognized if you paste an explicit link, but aren't
+  relied on automatically.
 - **Music categories**: the genre list in the `category` autocomplete is
   read live from the Deezer API (`/genre`) and cached for one hour. When you
   pick a category, the bot combines the Deezer chart filtered by that genre
-  (primary, reliable source, ~70% of songs) with an iTunes search for the
-  same category name (secondary source, for extra variety, ~30%). The
-  iTunes genre search is an approximation (it searches the genre name as a
-  free-text term, not a true genre filter like Deezer's) because iTunes
-  doesn't offer a reliable, unauthenticated genre-filtered public API; the
-  full Apple Music API with real genres would require an Apple Developer
-  Program membership (paid).
+  with a public Deezer playlist found by searching for the genre name (and
+  a second search pass with " hits" appended if more variety is still
+  needed), so it isn't just the same chart every time.
+- **"Random" mode variety**: instead of always returning the global Deezer
+  chart, `random` mode also mixes in the charts of a few randomly-picked
+  Deezer genres each time you start a quiz, for more variety across runs.
 - **Special categories** (decades, Recent Hits, Trending Now, J-Pop, J-Rock,
   K-Pop, Anime): these don't map to a direct Deezer genre, so the bot
   dynamically searches for a relevant public Deezer playlist at request
   time (no fragile hardcoded IDs). If the search finds nothing suitable for
   a very niche category, the bot reports an error instead of returning
   irrelevant random results.
-- **Artist search**: uses Deezer's artist search combined with `rapidfuzz`
-  to tolerate typos and imprecise punctuation in the typed name, then reads
-  that artist's most popular tracks.
+- **Artist search, strictly one-artist**: uses Deezer's artist search
+  combined with `rapidfuzz` to tolerate typos, then builds a pool from that
+  artist's top tracks plus deep cuts from their studio albums (compilation
+  albums and any track credited to a different main artist are excluded).
+  Every song played, and every wrong-answer button in multiple choice mode,
+  is guaranteed to be from that one artist — there's also a safety filter
+  when building multiple-choice options that double-checks each decoy
+  against the locked artist before it can appear as a button.
 - Each round lasts at most `ROUND_DURATION_SECONDS` (default 30s, adjustable
   in `.env`), or ends earlier once the title and artist are both guessed
   (open answer mode) or everyone in voice has answered (multiple choice mode).

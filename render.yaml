@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: discord-quiz-bot
+    env: docker
+    plan: free
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: ROUND_DURATION_SECONDS
+        value: "30"
